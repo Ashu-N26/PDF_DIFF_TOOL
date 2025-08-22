@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PDF Diff Tool (One URL)</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <!-- PDF.js (browser viewer) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>PDF Diff Tool</h1>
+    <p>Upload OLD & NEW PDFs, get merged output + side-by-side viewer.</p>
+  </header>
+
+  <section class="uploader">
+    <form id="compareForm">
+      <label>Old PDF: <input type="file" name="pdf1" accept="application/pdf" required></label>
+      <label>New PDF: <input type="file" name="pdf2" accept="application/pdf" required></label>
+      <button type="submit">Compare</button>
+    </form>
+    <div id="resultLinks"></div>
+  </section>
+
+  <section class="viewer">
+    <div class="pane">
+      <h3>OLD</h3>
+      <canvas id="canvasOld"></canvas>
+    </div>
+    <div class="pane">
+      <h3>NEW (annotated overlays)</h3>
+      <canvas id="canvasNew"></canvas>
+    </div>
+  </section>
+
+  <footer>
+    <small>Red = changed/removed, Green = added | This viewer uses PDF.js in the browser for quick inspection.</small>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
