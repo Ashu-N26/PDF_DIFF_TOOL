@@ -1,42 +1,99 @@
 <!doctype html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <title>PDF Diff Tool (One URL)</title>
-  <link rel="stylesheet" href="/styles.css" />
-  <!-- PDF.js (browser viewer) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <meta charset="utf-8" />
+  <title>Advanced PDF Diff (single URL)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 20px; }
+    .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+    .col { flex: 1 1 360px; min-width: 320px; }
+    iframe, embed { width: 100%; height: 70vh; border: 1px solid #ccc; }
+    .btn { padding: 8px 14px; border: 0; background: #111827; color: #fff; border-radius: 6px; cursor: pointer; }
+    .muted { color: #6b7280; font-size: 12px; }
+    .legend span { padding: 3px 6px; border-radius: 4px; margin-right: 6px; color: #fff; }
+    .g { background:#16a34a; } .r { background:#ef4444; } .o{ background:#fb923c; }
+  </style>
 </head>
 <body>
-  <header>
-    <h1>PDF Diff Tool</h1>
-    <p>Upload OLD & NEW PDFs, get merged output + side-by-side viewer.</p>
-  </header>
+  <h2>Advanced PDF Diff</h2>
+  <div class="legend muted">
+    <span class="g">Added</span>
+    <span class="r">Removed</span>
+    <span class="o">Value changed (old→new)</span>
+  </div>
+  <p class="muted">Upload two PDFs (Old & New). You’ll get a merged PDF with a Summary page + diff boxes. You can also preview originals side-by-side below.</p>
 
-  <section class="uploader">
-    <form id="compareForm">
-      <label>Old PDF: <input type="file" name="pdf1" accept="application/pdf" required></label>
-      <label>New PDF: <input type="file" name="pdf2" accept="application/pdf" required></label>
-      <button type="submit">Compare</button>
-    </form>
-    <div id="resultLinks"></div>
-  </section>
-
-  <section class="viewer">
-    <div class="pane">
-      <h3>OLD</h3>
-      <canvas id="canvasOld"></canvas>
+  <form id="f" class="row">
+    <div class="col">
+      <label>Old PDF
+        <input type="file" id="old" accept="application/pdf" required />
+      </label>
     </div>
-    <div class="pane">
-      <h3>NEW (annotated overlays)</h3>
-      <canvas id="canvasNew"></canvas>
+    <div class="col">
+      <label>New PDF
+        <input type="file" id="nw" accept="application/pdf" required />
+      </label>
     </div>
-  </section>
+    <div class="col" style="flex:0 0 auto">
+      <button class="btn" type="submit">Compare & Download</button>
+    </div>
+  </form>
 
-  <footer>
-    <small>Red = changed/removed, Green = added | This viewer uses PDF.js in the browser for quick inspection.</small>
-  </footer>
+  <div class="row" style="margin-top:16px">
+    <div class="col">
+      <h4>Old (left)</h4>
+      <embed id="prevOld" type="application/pdf" />
+    </div>
+    <div class="col">
+      <h4>New (right)</h4>
+      <embed id="prevNew" type="application/pdf" />
+    </div>
+  </div>
 
-  <script src="/app.js"></script>
+  <script>
+    const form = document.getElementById('f');
+    const oldIn = document.getElementById('old');
+    const newIn = document.getElementById('nw');
+    const prevOld = document.getElementById('prevOld');
+    const prevNew = document.getElementById('prevNew');
+
+    function setPreview(input, target) {
+      if (input.files && input.files[0]) {
+        const url = URL.createObjectURL(input.files[0]);
+        target.src = url;
+      }
+    }
+    oldIn.addEventListener('change', () => setPreview(oldIn, prevOld));
+    newIn.addEventListener('change', () => setPreview(newIn, prevNew));
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData();
+      fd.append('pdf1', oldIn.files[0]);
+      fd.append('pdf2', newIn.files[0]);
+
+      const btn = form.querySelector('button');
+      btn.disabled = true; btn.textContent = 'Processing…';
+
+      try {
+        const r = await fetch('/api/compare', { method: 'POST', body: fd });
+        if (!r.ok) throw new Error(await r.text());
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+
+        // Download + open in tab
+        const a = document.createElement('a');
+        a.href = url; a.download = 'diff.pdf';
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        alert('Failed: ' + err.message);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Compare & Download';
+      }
+    });
+  </script>
 </body>
 </html>
+
