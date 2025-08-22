@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: pdf-diff
+    runtime: node
+    plan: free
+    buildCommand: "yarn install"
+    startCommand: "node server.js"
