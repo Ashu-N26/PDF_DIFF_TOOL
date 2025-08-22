@@ -1,72 +1,63 @@
-const fs = require("fs");
-const path = require("path");
-const pdfjs = require("pdfjs-dist/legacy/build/pdf.js");
+// Extract words with approximate bounding boxes using pdfjs-dist (Node)
+const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 
-// Tell pdfjs to use its internal worker in Node
-pdfjs.GlobalWorkerOptions.workerSrc =
-  require("pdfjs-dist/legacy/build/pdf.worker.js");
+// Helper to split a text item into per-word boxes
+function splitIntoWordBoxes(item, viewport) {
+  const words = [];
+  const str = item.str || "";
+  if (!str.trim()) return words;
 
-async function extractDocument(pdfPath) {
-  const data = new Uint8Array(fs.readFileSync(pdfPath));
-  const loadingTask = pdfjs.getDocument({ data, useSystemFonts: true });
+  const fullWidth = item.width || Math.abs(item.transform[0]) * str.length || 0;
+  const charW = fullWidth / Math.max(str.length, 1);
+
+  const segments = str.match(/\S+|\s+/g) || [];
+  let cursorX = item.transform[4]; // e
+  const pageHeight = viewport.height;
+
+  for (const seg of segments) {
+    const isSpace = /^\s+$/.test(seg);
+    const w = isSpace ? charW * seg.length : charW * seg.length;
+    if (!isSpace) {
+      words.push({
+        text: seg,
+        x: cursorX,
+        y: pageHeight - item.transform[5], // flip y
+        width: w,
+        height: Math.max(item.height || Math.abs(item.transform[3]) || 10, 8),
+      });
+    }
+    cursorX += w;
+  }
+  return words;
+}
+
+async function extractWords(pdfBuffer) {
+  const loadingTask = pdfjsLib.getDocument({ data: pdfBuffer, useSystemFonts: true });
   const doc = await loadingTask.promise;
+  const tokens = []; // {page, text, x,y,w,h}
 
-  const pages = [];
   for (let p = 1; p <= doc.numPages; p++) {
     const page = await doc.getPage(p);
     const viewport = page.getViewport({ scale: 1.0 });
-    const textContent = await page.getTextContent();
-
-    // Collect words with boxes (merge chars into words by spacing)
-    const words = [];
-    let current = null;
-
-    const pushCurrent = () => {
-      if (current) {
-        // Normalize y to PDF coordinate space (pdfjs gives top-left y)
-        const yPdf = viewport.height - (current.y + current.h);
-        words.push({ text: current.text, x: current.x, y: yPdf, w: current.w, h: current.h });
+    const content = await page.getTextContent({ normalizeWhitespace: true });
+    for (const item of content.items) {
+      const boxes = splitIntoWordBoxes(item, viewport);
+      for (const b of boxes) {
+        tokens.push({
+          page: p,
+          text: b.text,
+          x: b.x,
+          y: b.y,
+          width: b.width,
+          height: b.height
+        });
       }
-      current = null;
-    };
-
-    for (const item of textContent.items) {
-      const str = item.str;
-      const tx = pdfjs.Util.transform(viewport.transform, item.transform);
-      // tx = [a, b, c, d, e, f] → origin at (e, f), width ~ item.width, height ~ fontSize
-      const x = tx[4], yTop = tx[5];
-      const h = Math.abs(tx[3]);
-      const w = item.width;
-
-      const tokens = str.split(/(\s+)/).filter(t => t.length > 0);
-      let cx = x;
-      tokens.forEach(tok => {
-        const isSpace = /^\s+$/.test(tok);
-        const tokWidth = (w * tok.length) / str.length;
-
-        if (isSpace) {
-          pushCurrent();
-        } else {
-          if (!current) current = { text: tok, x: cx, y: yTop - h, w: tokWidth, h };
-          else {
-            // merge contiguous token into a word
-            current.text += tok;
-            current.w = (cx + tokWidth) - current.x;
-          }
-        }
-        cx += tokWidth;
-      });
-      pushCurrent();
     }
-
-    pages.push({
-      width: viewport.width,
-      height: viewport.height,
-      words
-    });
+    page.cleanup();
   }
-
-  return { pageCount: pages.length, pages };
+  await doc.destroy();
+  return tokens;
 }
 
-module.exports = { extractDocument };
+module.exports = { extractWords };
+
