@@ -1,25 +1,19 @@
 {
   "name": "pdf-diff-tool",
-  "version": "2.2.0",
-  "description": "Advanced PDF diff with word-level boxes, red/green highlights, summary panel, merged output, and a side-by-side viewer.",
+  "version": "1.0.0",
   "private": true,
   "type": "commonjs",
-  "engines": {
-    "node": ">=18 <=22"
-  },
+  "engines": { "node": ">=18 <=22.18" },
   "scripts": {
-    "start": "node server.js",
-    "build": "echo \"No build step\""
+    "start": "node server.js"
   },
   "dependencies": {
-    "canvas": "^2.11.2",
     "cors": "^2.8.5",
-    "diff": "^7.0.0",
-    "express": "^4.19.2",
-    "fs-extra": "^11.2.0",
-    "multer": "^1.4.5-lts.1",
+    "diff": "^5.1.0",
+    "express": "^4.18.3",
+    "multer": "1.4.5-lts.2",
     "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "^3.11.174",
-    "uuid": "^9.0.1"
+    "pdfjs-dist": "^3.11.174"
   }
 }
+
