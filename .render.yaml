@@ -3,6 +3,12 @@ services:
     name: pdf-diff-tool
     env: node
     plan: free
-    buildCommand: "npm install"
-    startCommand: "npm start"
-
+    region: oregon
+    buildCommand: yarn install
+    startCommand: node server.js
+    autoDeploy: true
+    envVars:
+      - key: NODE_OPTIONS
+        value: "--max_old_space_size=4096"
+      - key: NPM_CONFIG_LOGLEVEL
+        value: "warn"
