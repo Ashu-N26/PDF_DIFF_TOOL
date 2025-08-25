@@ -1,19 +1,22 @@
 {
   "name": "pdf-diff-tool",
   "version": "1.0.0",
-  "private": true,
-  "type": "commonjs",
-  "engines": { "node": ">=18 <=22.18" },
+  "description": "Standalone PDF comparison tool",
+  "main": "server.js",
+  "bin": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "pkg . --targets node18-win-x64 --output dist/pdf_diff_tool.exe"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "diff": "^5.1.0",
-    "express": "^4.18.3",
-    "multer": "1.4.5-lts.2",
-    "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "^3.11.174"
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.1",
+    "diff": "^5.2.0"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
   }
 }
+
 
