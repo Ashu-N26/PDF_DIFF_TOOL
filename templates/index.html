@@ -1,4 +1,3 @@
-<!-- templates/index.html -->
 <!doctype html>
 <html>
 <head>
@@ -8,20 +7,24 @@
 </head>
 <body>
   <div class="container">
-    <h1>PDF Comparison — AIP / IAC (PDF_DIFF_TOOL)</h1>
-    <p class="note">Upload old and new PDF. Output: annotated PDF, side-by-side PDF, summary.</p>
-
+    <h1>PDF DIFF TOOL</h1>
+    <p class="author">Created by Ashutosh Nanaware</p>
     <form action="/compare" method="post" enctype="multipart/form-data">
       <label>Old PDF (previous)</label>
-      <input type="file" name="old_pdf" accept="application/pdf" required>
-
+      <input type="file" name="pdf1" accept="application/pdf" required>
       <label>New PDF (latest)</label>
-      <input type="file" name="new_pdf" accept="application/pdf" required>
-
-      <button type="submit" class="btn">Compare PDFs</button>
+      <input type="file" name="pdf2" accept="application/pdf" required>
+      <button type="submit">Compare</button>
     </form>
-
-    <footer>Created by Ashutosh Nanaware</footer>
+    <p>Or <a href="/sample">generate sample PDFs</a> (for quick test)</p>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul class="flashes">
+        {% for m in messages %}<li>{{m}}</li>{% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
   </div>
 </body>
 </html>
+
