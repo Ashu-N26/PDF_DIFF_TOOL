@@ -1,22 +1,23 @@
-<!-- templates/result.html -->
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>PDF Diff Results</title>
+  <title>Results - PDF Diff</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="container">
     <h1>Comparison Results</h1>
-    <ul class="results">
-      <li><a href="/download/{{ annotated }}">Annotated New PDF (green = added/changed)</a></li>
-      <li><a href="/download/{{ side_by_side }}">Side-by-Side PDF</a></li>
-      <li><a href="/download/{{ summary }}">Summary PDF</a></li>
-      <li><a href="/download/{{ merged }}">Merged Report (summary + annotated new)</a></li>
+    <p>Download outputs:</p>
+    <ul>
+      <li><a href="{{ url_for('download_file', filename=outputs.annotated_old) }}">{{ outputs.annotated_old }}</a></li>
+      <li><a href="{{ url_for('download_file', filename=outputs.annotated_new) }}">{{ outputs.annotated_new }}</a></li>
+      <li><a href="{{ url_for('download_file', filename=outputs.side_by_side) }}">{{ outputs.side_by_side }}</a></li>
+      <li><a href="{{ url_for('download_file', filename=outputs.summary) }}">{{ outputs.summary }}</a></li>
+      <li><a href="{{ url_for('download_file', filename=outputs.merged_report) }}">{{ outputs.merged_report }}</a></li>
     </ul>
-    <a href="/" class="btn">Compare another pair</a>
-    <footer>Created by Ashutosh Nanaware</footer>
+    <p><a href="/">Do another comparison</a></p>
   </div>
 </body>
 </html>
+
