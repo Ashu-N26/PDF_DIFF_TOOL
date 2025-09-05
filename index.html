@@ -1,18 +1,27 @@
-<!DOCTYPE html>
+<!-- templates/index.html -->
+<!doctype html>
 <html>
 <head>
-    <title>PDF Diff Tool</title>
-    <link rel="stylesheet" href="/static/style.css">
+  <meta charset="utf-8">
+  <title>PDF Diff Tool</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <h1>PDF Comparison Tool</h1>
+  <div class="container">
+    <h1>PDF Comparison — AIP / IAC (PDF_DIFF_TOOL)</h1>
+    <p class="note">Upload old and new PDF. Output: annotated PDF, side-by-side PDF, summary.</p>
+
     <form action="/compare" method="post" enctype="multipart/form-data">
-        <label>Upload Old PDF:</label>
-        <input type="file" name="old_pdf" required><br><br>
-        <label>Upload New PDF:</label>
-        <input type="file" name="new_pdf" required><br><br>
-        <button type="submit">Compare</button>
+      <label>Old PDF (previous)</label>
+      <input type="file" name="old_pdf" accept="application/pdf" required>
+
+      <label>New PDF (latest)</label>
+      <input type="file" name="new_pdf" accept="application/pdf" required>
+
+      <button type="submit" class="btn">Compare PDFs</button>
     </form>
+
     <footer>Created by Ashutosh Nanaware</footer>
+  </div>
 </body>
 </html>
