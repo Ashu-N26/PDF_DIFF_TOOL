@@ -1,60 +1,45 @@
-# app.py
 import os
-import time
-from flask import Flask, render_template, request, send_file, flash, redirect, url_for
+from flask import Flask, render_template, request, send_from_directory
 from pdf_diff import compare_pdfs
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET", "pdfdiffsecret")
 
-UPLOAD_FOLDER = "uploads"
-OUTPUT_FOLDER = "output"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+# Ensure required folders exist
+os.makedirs("uploads", exist_ok=True)
+os.makedirs("output", exist_ok=True)
 
-@app.route("/", methods=["GET"])
-def index():
+
+@app.route("/")
+def home():
     return render_template("index.html")
+
 
 @app.route("/compare", methods=["POST"])
 def compare():
     if "old_pdf" not in request.files or "new_pdf" not in request.files:
-        flash("Please upload both old and new PDF files.")
-        return redirect(url_for("index"))
+        return "Please upload both PDFs.", 400
 
-    old_file = request.files["old_pdf"]
-    new_file = request.files["new_pdf"]
-    if old_file.filename == "" or new_file.filename == "":
-        flash("Please choose files to upload.")
-        return redirect(url_for("index"))
+    old_pdf = request.files["old_pdf"]
+    new_pdf = request.files["new_pdf"]
 
-    ts = int(time.time())
-    old_path = os.path.join(UPLOAD_FOLDER, f"old_{ts}.pdf")
-    new_path = os.path.join(UPLOAD_FOLDER, f"new_{ts}.pdf")
-    old_file.save(old_path)
-    new_file.save(new_path)
+    old_path = os.path.join("uploads", old_pdf.filename)
+    new_path = os.path.join("uploads", new_pdf.filename)
 
-    try:
-        annotated, side_by_side, summary, merged = compare_pdfs(old_path, new_path, OUTPUT_FOLDER, prefix=f"{ts}_")
-    except Exception as e:
-        flash(f"Error while processing PDFs: {e}")
-        return redirect(url_for("index"))
+    old_pdf.save(old_path)
+    new_pdf.save(new_path)
 
-    return render_template("result.html",
-                           annotated=annotated,
-                           side_by_side=side_by_side,
-                           summary=summary,
-                           merged=merged)
+    # Run comparison (outputs annotated PDFs + summary)
+    output_files = compare_pdfs(old_path, new_path, "output")
+
+    return render_template("result.html", outputs=output_files)
+
 
 @app.route("/download/<path:filename>")
 def download(filename):
-    path = os.path.join(OUTPUT_FOLDER, filename)
-    if not os.path.exists(path):
-        flash("File not found.")
-        return redirect(url_for("index"))
-    return send_file(path, as_attachment=True)
+    return send_from_directory("output", filename, as_attachment=True)
+
 
 if __name__ == "__main__":
-    # local debug only
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    app.run(host="0.0.0.0", port=5000)
+
 
