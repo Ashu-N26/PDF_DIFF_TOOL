@@ -1,16 +1,12 @@
-# PDF_DIFF_TOOL (Render Web Version)
+# PDF_DIFF_TOOL (Render Web)
+
 Created by Ashutosh Nanaware
 
-## Deployment on Render
-1. Go to [Render](https://render.com)
-2. Create a new **Web Service**
-3. Upload this ZIP or connect GitHub repo
-4. Set **Start Command** = `python app.py`
-5. Render auto-installs from `requirements.txt`
+## Deploy to Render (quick)
+1. Push these files to a GitHub repo (root of repo).
+2. On Render: New → Web Service → Connect your repo.
+3. Build command: `pip install -r requirements.txt`
+4. Start command: `gunicorn app:app --bind 0.0.0.0:$PORT`
+5. Deploy. Open the public URL and upload old/new PDFs.
 
-App will be available at your Render URL.
-
-## Features
-- Annotated PDF (Red = removed, Green = added)
-- Side-by-Side PDF (old vs new)
-- Summary panel PDF (DA/MDA, VIS, RVR changes)
+Outputs: annotated_new.pdf, side_by_side.pdf, summary.pdf, merged_report.pdf (in `output/`).
