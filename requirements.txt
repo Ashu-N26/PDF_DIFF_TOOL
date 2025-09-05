@@ -1,2 +1,5 @@
-flask
+Flask>=2.2
+gunicorn
+PyMuPDF>=1.23.0
+Pillow
 reportlab
