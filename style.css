@@ -1,3 +1,12 @@
-body { font-family: Arial, sans-serif; margin: 20px; }
-h1 { color: #333; }
-footer { margin-top: 40px; font-size: 12px; color: gray; }
+/* static/style.css */
+body { font-family: Arial, Helvetica, sans-serif; background: #f7f8fb; color:#222; }
+.container { max-width:760px; margin:40px auto; background:#fff; padding:22px 28px; border-radius:8px; box-shadow: 0 6px 18px rgba(0,0,0,0.06); }
+h1 { margin-top:0; color:#1f2937; }
+form { margin-top:18px; display:flex; flex-direction:column; gap:10px; }
+label { font-weight:600; font-size:13px; }
+input[type=file] { padding:6px 4px; }
+.btn { background:#0b74de; color:#fff; border:none; padding:10px 14px; border-radius:6px; cursor:pointer; text-decoration:none; display:inline-block; margin-top:10px; }
+.results { list-style:none; padding-left:0; }
+.results li { margin-bottom:8px; }
+.note { color:#555; margin-bottom:10px; }
+footer { margin-top:18px; color:#7b7b7b; font-size:12px; text-align:center; }
