@@ -1,38 +1,56 @@
 <!doctype html>
 <html>
-<head>
-  <meta charset="utf-8"/>
-  <title>PDF Diff Tool</title>
-  <link rel="stylesheet" href="/static/style.css"/>
-</head>
-<body>
-  <div class="container">
-    <h1>PDF Diff Tool</h1>
-    <form id="uploadForm">
-      <label>Old PDF (previous)</label><input type="file" id="oldpdf" name="oldpdf" accept="application/pdf" required/>
-      <label>New PDF (latest)</label><input type="file" id="newpdf" name="newpdf" accept="application/pdf" required/>
-      <button type="submit">Compare</button>
-    </form>
+  <head>
+    <meta charset="utf-8"/>
+    <title>PDF DIFF TOOL</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>PDF Diff Tool</h1>
+      <form action="/compare" method="post" enctype="multipart/form-data">
+        <label>Old PDF</label>
+        <input type="file" name="old_pdf" accept=".pdf"/>
+        <label>New PDF</label>
+        <input type="file" name="new_pdf" accept=".pdf"/>
+        <div class="row">
+          <input type="checkbox" id="use_sample" name="use_sample">
+          <label for="use_sample">Use sample demo PDFs</label>
+        </div>
+        <button type="submit">Compare</button>
+      </form>
 
-    <div id="result" style="display:none">
-      <h2>Preview — Side by side text</h2>
-      <div id="pane">
-        <div id="oldPanel" class="panel"><h3>Old</h3><pre id="oldText"></pre></div>
-        <div id="newPanel" class="panel"><h3>New</h3><pre id="newText"></pre></div>
-      </div>
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          <ul class="flashes">
+            {% for msg in messages %}<li>{{msg}}</li>{% endfor %}
+          </ul>
+        {% endif %}
+      {% endwith %}
 
-      <h3>Diff details</h3>
-      <div id="diffList"></div>
+      {% if result %}
+        <h2>Results</h2>
+        <ul>
+          {% if result.annotated_old %}
+            <li><a href="{{ url_for('outputs', filename=result.annotated_old) }}">Download Annotated Old PDF</a></li>
+          {% endif %}
+          {% if result.annotated_new %}
+            <li><a href="{{ url_for('outputs', filename=result.annotated_new) }}">Download Annotated New PDF</a></li>
+          {% endif %}
+          <li><a href="{{ url_for('outputs', filename=result.merged) }}">Download Merged Report (summary + annotated)</a></li>
+          <li><a href="{{ url_for('outputs', filename=result.side_by_side) }}">Download Side-by-Side PDF</a></li>
+          <li><a href="{{ url_for('outputs', filename=result.summary) }}">Download Summary Text</a></li>
+        </ul>
 
-      <h3>Downloads</h3>
-      <a id="dl_merged" href="#" target="_blank">Merged annotated PDF</a> |
-      <a id="dl_side" href="#" target="_blank">Side-by-side PDF</a> |
-      <a id="dl_summary" href="#" target="_blank">Summary PDF</a>
+        <h3>Preview: merged report</h3>
+        <iframe src="{{ url_for('outputs', filename=result.merged) }}" style="width:100%;height:600px;"></iframe>
+      {% endif %}
+
+      <footer>Created by Ashutosh Nanaware</footer>
     </div>
-  </div>
-  <script src="/static/script.js"></script>
-</body>
+  </body>
 </html>
+
 
 
 
