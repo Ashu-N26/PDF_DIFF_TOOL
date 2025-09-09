@@ -2,7 +2,8 @@ services:
   - type: web
     name: pdf-diff-tool
     env: python
-    plan: starter
-    repo: https://github.com/<your-user>/<your-repo>
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    branch: main
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --timeout 300"
+
