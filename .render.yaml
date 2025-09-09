@@ -2,8 +2,14 @@ services:
   - type: web
     name: pdf-diff-tool
     env: python
-    branch: main
     plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --timeout 300"
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 4 --threads 2 --timeout 120
+    autoDeploy: true
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PORT
+        value: "10000"
+
 
