@@ -1,109 +1,82 @@
+# app.py
 import os
-import io
-from flask import Flask, render_template, request, send_file, jsonify
-import fitz  # PyMuPDF
-import pdfplumber
-from pdf2image import convert_from_path
-from difflib import HtmlDiff
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
+import time
+from flask import Flask, render_template, request, send_file, jsonify, redirect, url_for
 from werkzeug.utils import secure_filename
+from utils.pdf_diff import compare_pdfs, ensure_dirs
 
-# Flask app
-app = Flask(__name__)
-app.config["UPLOAD_FOLDER"] = "uploads"
-os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+UPLOAD_FOLDER = "uploads"
+OUTPUT_FOLDER = "output"
+ALLOWED_EXT = {".pdf"}
 
-# ---------------------------
-# Utility: Extract text from PDF
-# ---------------------------
-def extract_text_from_pdf(pdf_path):
-    text = ""
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text += page.extract_text() or ""  # handles scanned PDFs (returns None if no text)
-    return text.strip()
+ensure_dirs([UPLOAD_FOLDER, OUTPUT_FOLDER])
 
-# ---------------------------
-# Utility: Diff text into HTML
-# ---------------------------
-def generate_text_diff(text1, text2):
-    diff = HtmlDiff(wrapcolumn=80)
-    return diff.make_table(
-        text1.splitlines(), text2.splitlines(),
-        fromdesc="Old PDF", todesc="New PDF"
-    )
+app = Flask(__name__, static_folder="static", template_folder="templates")
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["OUTPUT_FOLDER"] = OUTPUT_FOLDER
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB cap
 
-# ---------------------------
-# Utility: Generate downloadable PDF report
-# ---------------------------
-def generate_diff_pdf(diff_html):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=letter)
-    textobject = c.beginText(40, 750)
-
-    # Strip HTML tags (keep only raw text for PDF report)
-    clean_text = (
-        diff_html.replace("<td>", " ")
-                 .replace("</td>", " ")
-                 .replace("<tr>", "\n")
-                 .replace("<br>", "\n")
-                 .replace("&nbsp;", " ")
-    )
-
-    for line in clean_text.splitlines():
-        textobject.textLine(line[:100])  # trim long lines
-    c.drawText(textobject)
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    return buffer
-
-# ---------------------------
-# Routes
-# ---------------------------
 @app.route("/")
 def index():
     return render_template("index.html")
 
 @app.route("/compare", methods=["POST"])
 def compare():
+    """
+    Accepts two files: 'old_pdf' and 'new_pdf'
+    Optional form flags:
+      - ocr (on/off)
+      - annotate_pages (on/off) -> heavy; off by default
+    Returns: zipped files or single merged_report.pdf
+    """
     try:
-        if "pdf1" not in request.files or "pdf2" not in request.files:
-            return jsonify({"error": "Please upload two PDF files"}), 400
+        if "old_pdf" not in request.files or "new_pdf" not in request.files:
+            return jsonify({"error": "Upload both old and new PDF files (fields: old_pdf, new_pdf)."}), 400
 
-        pdf1 = request.files["pdf1"]
-        pdf2 = request.files["pdf2"]
+        oldf = request.files["old_pdf"]
+        newf = request.files["new_pdf"]
 
-        filename1 = secure_filename(pdf1.filename)
-        filename2 = secure_filename(pdf2.filename)
+        def allowed(fn):
+            return os.path.splitext(fn)[1].lower() in ALLOWED_EXT
 
-        path1 = os.path.join(app.config["UPLOAD_FOLDER"], filename1)
-        path2 = os.path.join(app.config["UPLOAD_FOLDER"], filename2)
+        ofn = secure_filename(oldf.filename)
+        nfn = secure_filename(newf.filename)
+        if not allowed(ofn) or not allowed(nfn):
+            return jsonify({"error": "Only PDF files are allowed."}), 400
 
-        pdf1.save(path1)
-        pdf2.save(path2)
+        ts = int(time.time())
+        old_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{ts}_OLD_{ofn}")
+        new_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{ts}_NEW_{nfn}")
 
-        # Extract text
-        text1 = extract_text_from_pdf(path1)
-        text2 = extract_text_from_pdf(path2)
+        oldf.save(old_path)
+        newf.save(new_path)
 
-        if not text1 and not text2:
-            return jsonify({"error": "Both PDFs seem to be scanned images with no extractable text."}), 400
+        # parse options
+        do_ocr = request.form.get("ocr", "off") == "on"
+        annotate_pages = request.form.get("annotate_pages", "off") == "on"
 
-        diff_html = generate_text_diff(text1, text2)
-        pdf_buffer = generate_diff_pdf(diff_html)
+        # call compare routine
+        result = compare_pdfs(
+            old_path,
+            new_path,
+            app.config["OUTPUT_FOLDER"],
+            do_ocr=do_ocr,
+            enable_page_annotations=annotate_pages,
+            prefix=f"{ts}_"
+        )
 
-        return send_file(pdf_buffer, as_attachment=True, download_name="diff_report.pdf")
+        # result contains paths to generated files
+        return jsonify({"success": True, "outputs": result})
 
     except Exception as e:
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        # Return useful traceback info to logs while giving user-friendly message
+        app.logger.exception("Compare failed")
+        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
 
-# ---------------------------
-# Run
-# ---------------------------
 if __name__ == "__main__":
+    # local dev: debug on
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
