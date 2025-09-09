@@ -1,124 +1,110 @@
-# app.py
 import os
-import sys
-import time
-import json
-import logging
-import subprocess
-from flask import Flask, render_template, request, send_from_directory, redirect, url_for, flash
+import io
+from flask import Flask, render_template, request, send_file, jsonify
+import fitz  # PyMuPDF
+import pdfplumber
+from pdf2image import convert_from_path
+from difflib import HtmlDiff
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
 from werkzeug.utils import secure_filename
-from utils.pdf_diff import ensure_dirs, generate_sample_pdfs
 
-# Config
-UPLOAD_FOLDER = "uploads"
-OUTPUT_FOLDER = "outputs"
-ALLOWED_EXT = {".pdf"}
-MAX_FILE_BYTES = 150 * 1024 * 1024  # 150 MB file limit
-SUBPROCESS_TIMEOUT = 240  # seconds (adjust if needed)
-
-ensure_dirs([UPLOAD_FOLDER, OUTPUT_FOLDER, "tmp", "sample"])
-
+# Flask app
 app = Flask(__name__)
-app.secret_key = "pdfdiff-secret"  # change for production
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["OUTPUT_FOLDER"] = OUTPUT_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024  # 250MB global cap
+app.config["UPLOAD_FOLDER"] = "uploads"
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
-# generate tiny demo PDFs if missing
-generate_sample_pdfs("sample/old_demo.pdf", "sample/new_demo.pdf")
+# ---------------------------
+# Utility: Extract text from PDF
+# ---------------------------
+def extract_text_from_pdf(pdf_path):
+    text = ""
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text() or ""  # handles scanned PDFs (returns None if no text)
+    return text.strip()
 
-logging.basicConfig(level=logging.INFO)
+# ---------------------------
+# Utility: Diff text into HTML
+# ---------------------------
+def generate_text_diff(text1, text2):
+    diff = HtmlDiff(wrapcolumn=80)
+    return diff.make_table(
+        text1.splitlines(), text2.splitlines(),
+        fromdesc="Old PDF", todesc="New PDF"
+    )
 
-def allowed(filename):
-    return os.path.splitext(filename)[1].lower() in ALLOWED_EXT
+# ---------------------------
+# Utility: Generate downloadable PDF report
+# ---------------------------
+def generate_diff_pdf(diff_html):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    textobject = c.beginText(40, 750)
 
+    # Strip HTML tags (keep only raw text for PDF report)
+    clean_text = (
+        diff_html.replace("<td>", " ")
+                 .replace("</td>", " ")
+                 .replace("<tr>", "\n")
+                 .replace("<br>", "\n")
+                 .replace("&nbsp;", " ")
+    )
+
+    for line in clean_text.splitlines():
+        textobject.textLine(line[:100])  # trim long lines
+    c.drawText(textobject)
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer
+
+# ---------------------------
+# Routes
+# ---------------------------
 @app.route("/")
 def index():
-    return render_template("index.html", sample_old="sample/old_demo.pdf", sample_new="sample/new_demo.pdf")
+    return render_template("index.html")
 
 @app.route("/compare", methods=["POST"])
 def compare():
-    use_sample = request.form.get("use_sample") == "on"
-    if use_sample:
-        old_path = os.path.abspath("sample/old_demo.pdf")
-        new_path = os.path.abspath("sample/new_demo.pdf")
-    else:
-        old_file = request.files.get("old_pdf")
-        new_file = request.files.get("new_pdf")
-        if not old_file or not new_file:
-            flash("Please upload both Old and New PDF files (or choose 'Use sample').")
-            return redirect(url_for("index"))
-        if not allowed(old_file.filename) or not allowed(new_file.filename):
-            flash("Only .pdf files are allowed.")
-            return redirect(url_for("index"))
-
-        t = int(time.time())
-        old_name = f"{t}_old_{secure_filename(old_file.filename)}"
-        new_name = f"{t}_new_{secure_filename(new_file.filename)}"
-        old_path = os.path.join(app.config["UPLOAD_FOLDER"], old_name)
-        new_path = os.path.join(app.config["UPLOAD_FOLDER"], new_name)
-        old_file.save(old_path)
-        new_file.save(new_path)
-
-        # enforce file size limit
-        if os.path.getsize(old_path) > MAX_FILE_BYTES or os.path.getsize(new_path) > MAX_FILE_BYTES:
-            os.remove(old_path)
-            os.remove(new_path)
-            flash(f"One of the uploads exceeds max allowed size ({MAX_FILE_BYTES // (1024*1024)} MB).")
-            return redirect(url_for("index"))
-
-    # call subprocess worker (this isolates crashes)
-    prefix = f"{int(time.time())}_"
-    worker_script = os.path.join("utils", "worker_compare.py")
-    cmd = [sys.executable, worker_script, old_path, new_path, app.config["OUTPUT_FOLDER"], prefix]
-
-    logging.info("Starting compare subprocess: %s", cmd)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        logging.exception("Compare subprocess timed out")
-        flash("Comparison timed out (too large or slow). Try smaller PDFs or increase timeout/plan.")
-        return redirect(url_for("index"))
+        if "pdf1" not in request.files or "pdf2" not in request.files:
+            return jsonify({"error": "Please upload two PDF files"}), 400
+
+        pdf1 = request.files["pdf1"]
+        pdf2 = request.files["pdf2"]
+
+        filename1 = secure_filename(pdf1.filename)
+        filename2 = secure_filename(pdf2.filename)
+
+        path1 = os.path.join(app.config["UPLOAD_FOLDER"], filename1)
+        path2 = os.path.join(app.config["UPLOAD_FOLDER"], filename2)
+
+        pdf1.save(path1)
+        pdf2.save(path2)
+
+        # Extract text
+        text1 = extract_text_from_pdf(path1)
+        text2 = extract_text_from_pdf(path2)
+
+        if not text1 and not text2:
+            return jsonify({"error": "Both PDFs seem to be scanned images with no extractable text."}), 400
+
+        diff_html = generate_text_diff(text1, text2)
+        pdf_buffer = generate_diff_pdf(diff_html)
+
+        return send_file(pdf_buffer, as_attachment=True, download_name="diff_report.pdf")
+
     except Exception as e:
-        logging.exception("Failed to run compare subprocess")
-        flash(f"Failed to run compare: {e}")
-        return redirect(url_for("index"))
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-    if proc.returncode != 0:
-        logging.error("Compare subprocess failed; stdout=%s stderr=%s", proc.stdout, proc.stderr)
-        # attempt to read outputs.json to show useful error, else generic
-        outputs_json = os.path.join(app.config["OUTPUT_FOLDER"], f"{prefix}outputs.json")
-        if os.path.exists(outputs_json):
-            try:
-                with open(outputs_json, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                    flash("Compare failed: " + data.get("error", "unknown"))
-            except Exception:
-                flash("Compare failed (see server logs).")
-        else:
-            flash("Compare failed (see server logs).")
-        return redirect(url_for("index"))
-
-    # read outputs JSON (worker writes it)
-    outputs_json = os.path.join(app.config["OUTPUT_FOLDER"], f"{prefix}outputs.json")
-    if not os.path.exists(outputs_json):
-        logging.error("Outputs JSON not found at %s", outputs_json)
-        flash("Internal error (no outputs). Please check logs.")
-        return redirect(url_for("index"))
-
-    with open(outputs_json, "r", encoding="utf-8") as fh:
-        outputs = json.load(fh)
-
-    # pass filenames for download
-    return render_template("index.html", result=outputs, sample_old="sample/old_demo.pdf", sample_new="sample/new_demo.pdf")
-
-@app.route("/outputs/<path:filename>")
-def outputs(filename):
-    return send_from_directory(app.config["OUTPUT_FOLDER"], filename, as_attachment=True)
-
+# ---------------------------
+# Run
+# ---------------------------
 if __name__ == "__main__":
-    # debug server for local testing
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
