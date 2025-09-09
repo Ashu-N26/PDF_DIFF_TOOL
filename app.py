@@ -1,61 +1,75 @@
 import os
 import time
-from flask import Flask, render_template, request, send_from_directory, jsonify
+from flask import Flask, render_template, request, send_from_directory, redirect, url_for, flash
+from werkzeug.utils import secure_filename
 from utils.pdf_diff import compare_pdfs, ensure_dirs, generate_sample_pdfs
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
-ensure_dirs([UPLOAD_FOLDER, OUTPUT_FOLDER])
+UPLOAD_FOLDER = "uploads"
+OUTPUT_FOLDER = "outputs"
+ALLOWED_EXT = {".pdf"}
 
-app = Flask(__name__, static_folder="static", template_folder="templates")
-app.config.update(
-    UPLOAD_FOLDER=UPLOAD_FOLDER,
-    OUTPUT_FOLDER=OUTPUT_FOLDER,
-    MAX_CONTENT_LENGTH=200 * 1024 * 1024
-)
+ensure_dirs([UPLOAD_FOLDER, OUTPUT_FOLDER, "tmp", "sample"])
+
+app = Flask(__name__)
+app.secret_key = "pdfdiff-secret"  # change for prod
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["OUTPUT_FOLDER"] = OUTPUT_FOLDER
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB
+
+# generate demo PDFs if none present (useful for quick tests)
+generate_sample_pdfs("sample/old_demo.pdf", "sample/new_demo.pdf")
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", sample_old="sample/old_demo.pdf", sample_new="sample/new_demo.pdf")
+
+def allowed(filename):
+    return os.path.splitext(filename)[1].lower() in ALLOWED_EXT
 
 @app.route("/compare", methods=["POST"])
 def compare():
-    # expects form fields 'oldpdf' and 'newpdf'
-    old = request.files.get("oldpdf")
-    new = request.files.get("newpdf")
-    if not old or not new:
-        return jsonify({"error": "Both files required"}), 400
+    # Accept files or use sample
+    old_file = request.files.get("old_pdf")
+    new_file = request.files.get("new_pdf")
+    use_sample = request.form.get("use_sample") == "on"
 
-    ts = int(time.time())
-    old_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{ts}_old.pdf")
-    new_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{ts}_new.pdf")
-    old.save(old_path)
-    new.save(new_path)
+    if use_sample:
+        old_path = os.path.abspath("sample/old_demo.pdf")
+        new_path = os.path.abspath("sample/new_demo.pdf")
+    else:
+        if not old_file or not new_file:
+            flash("Upload both old and new PDF files (or use sample).")
+            return redirect(url_for("index"))
+        if not allowed(old_file.filename) or not allowed(new_file.filename):
+            flash("Only .pdf allowed.")
+            return redirect(url_for("index"))
+        t = int(time.time())
+        old_name = f"{t}_old_{secure_filename(old_file.filename)}"
+        new_name = f"{t}_new_{secure_filename(new_file.filename)}"
+        old_path = os.path.join(app.config["UPLOAD_FOLDER"], old_name)
+        new_path = os.path.join(app.config["UPLOAD_FOLDER"], new_name)
+        old_file.save(old_path)
+        new_file.save(new_path)
 
+    # run compare (synchronous). For heavy docs increase gunicorn timeout (see README)
     try:
-        # compare_pdfs returns: annotated_path, side_by_side_path, summary_pdf_path, preview_data
-        annotated_path, side_by_side_path, summary_pdf_path, preview = compare_pdfs(
-            old_path, new_path, app.config['OUTPUT_FOLDER'], prefix=f"{ts}_"
-        )
+        outputs = compare_pdfs(old_path, new_path, app.config["OUTPUT_FOLDER"])
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Compare failed")
+        flash(f"Error during compare: {e}")
+        return redirect(url_for("index"))
 
-    # preview contains side-by-side text content and word-diff info for browser preview
-    response = {
-        "annotated": os.path.basename(annotated_path),
-        "side_by_side": os.path.basename(side_by_side_path),
-        "summary": os.path.basename(summary_pdf_path),
-        "preview": preview
-    }
-    return jsonify(response), 200
+    # outputs is dict with keys: annotated_old, annotated_new, merged, side_by_side, summary_page
+    return render_template("index.html", result=outputs, sample_old="sample/old_demo.pdf", sample_new="sample/new_demo.pdf")
 
-@app.route("/output/<path:filename>")
-def output_file(filename):
-    return send_from_directory(app.config['OUTPUT_FOLDER'], filename, as_attachment=True)
+@app.route("/outputs/<path:filename>")
+def outputs(filename):
+    return send_from_directory(app.config["OUTPUT_FOLDER"], filename, as_attachment=True)
 
 if __name__ == "__main__":
-    app.run(debug=True, port=int(os.environ.get("PORT", 5000)))
+    # debug server (local)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
+
 
 
 
