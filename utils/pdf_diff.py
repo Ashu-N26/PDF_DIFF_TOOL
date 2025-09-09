@@ -1,275 +1,424 @@
 # utils/pdf_diff.py
 import os
-import re
+import io
+import tempfile
+import shutil
+import logging
+from difflib import SequenceMatcher, HtmlDiff, unified_diff
+from typing import List, Dict, Tuple
+import pdfplumber
 import fitz  # PyMuPDF
-import difflib
-from PIL import Image, ImageDraw
-from reportlab.lib.pagesizes import letter
+from pdf2image import convert_from_path
 from reportlab.pdfgen import canvas
-from datetime import datetime
+from reportlab.lib.pagesizes import A4, letter
+from reportlab.lib.units import mm
+from PIL import Image, ImageDraw
+import pytesseract
 
-def ensure_dirs(dirs):
-    for d in dirs:
-        os.makedirs(d, exist_ok=True)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-def generate_sample_pdfs(old_path, new_path):
-    if not os.path.exists(old_path):
-        c = canvas.Canvas(old_path, pagesize=letter)
-        c.setFont("Helvetica", 12)
-        c.drawString(50, 700, "OLD CHARTS - SAMPLE")
-        c.drawString(50, 680, "MDA  300  VIS  800m   RVR  1200")
-        c.drawString(50, 640, "Waypoint ABC  Alt 5000")
-        c.save()
-    if not os.path.exists(new_path):
-        c = canvas.Canvas(new_path, pagesize=letter)
-        c.setFont("Helvetica", 12)
-        c.drawString(50, 700, "NEW CHARTS - SAMPLE")
-        c.drawString(50, 680, "MDA  280  VIS  800m   RVR  1200")
-        c.drawString(50, 640, "Waypoint ABC  Alt 5200")
-        c.save()
+def ensure_dirs(paths):
+    for p in paths if isinstance(paths, (list, tuple)) else [paths]:
+        os.makedirs(p, exist_ok=True)
 
-RED_FILL = (220, 40, 40, 120)
-GREEN_FILL = (20, 160, 60, 120)
-
-def _page_to_image(page, scale=1.0):
-    """Render page to PIL image. Returns PIL.Image and px_per_pt."""
-    mat = fitz.Matrix(scale, scale)
+# -------------------------
+# Text Extraction helpers
+# -------------------------
+def extract_text_pdfplumber(path: str) -> str:
     try:
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-    except Exception:
-        # fallback: try with scale=1.0
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.0,1.0), alpha=False)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    px_per_pt = pix.width / page.rect.width
-    return img, px_per_pt
+        text_parts = []
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                ptext = page.extract_text()
+                if ptext:
+                    text_parts.append(ptext)
+        return "\n".join(text_parts).strip()
+    except Exception as e:
+        logger.warning("pdfplumber failed: %s", e)
+        return ""
 
-def _collect_rects_for_phrase(page, phrase, px_per_pt):
-    rects = []
-    if not phrase or not page:
-        return rects
+def extract_text_pymupdf(path: str) -> str:
     try:
-        hits = page.search_for(phrase, hit_max=16)
-        for r in hits:
-            rects.append((r.x0*px_per_pt, r.y0*px_per_pt, r.x1*px_per_pt, r.y1*px_per_pt))
-        if rects:
-            return rects
-    except Exception:
-        pass
-    # fallback: per-word matching
-    try:
-        words = page.get_text("words")
-        tokens = re.findall(r"\w+[\w\-/\.]*", phrase)
-        used = set()
-        for t in tokens:
-            for i,w in enumerate(words):
-                if i in used: continue
-                if w[4].strip().lower() == t.lower():
-                    used.add(i)
-                    rects.append((w[0]*px_per_pt, w[1]*px_per_pt, w[2]*px_per_pt, w[3]*px_per_pt))
-                    break
-    except Exception:
-        pass
-    return rects
-
-def _draw_overlay(img, rects, color):
-    if not rects:
-        return img
-    overlay = Image.new("RGBA", img.size, (255,255,255,0))
-    draw = ImageDraw.Draw(overlay)
-    for r in rects:
-        draw.rectangle([r[0], r[1], r[2], r[3]], fill=color)
-    out = Image.alpha_composite(img.convert("RGBA"), overlay)
-    return out.convert("RGB")
-
-def _save_images_as_pdf(images, out_path, dpi=150):
-    if not images:
-        return
-    first, rest = images[0], images[1:]
-    first.save(out_path, "PDF", resolution=dpi, save_all=True, append_images=rest)
-
-def compare_pdfs(old_path, new_path, out_dir, prefix="", scale=1.0, page_limit=200):
-    """
-    Safer compare. scale default 1.0 (reduce memory).
-    Returns dict of output filenames (basename).
-    """
-    ensure_dirs([out_dir])
-    prefix = prefix or ""
-    old_doc = fitz.open(old_path)
-    new_doc = fitz.open(new_path)
-
-    page_count = max(len(old_doc), len(new_doc))
-    page_count = min(page_count, page_limit)
-
-    annotated_old_images = []
-    annotated_new_images = []
-    summary_entries = []
-    totals = {"added":0,"removed":0,"changed":0}
-
-    for p in range(page_count):
-        old_page = old_doc.load_page(p) if p < len(old_doc) else None
-        new_page = new_doc.load_page(p) if p < len(new_doc) else None
-
-        old_text = ""
-        new_text = ""
-        try:
-            if old_page:
-                old_text = old_page.get_text("text")
-        except Exception:
-            old_text = ""
-        try:
-            if new_page:
-                new_text = new_page.get_text("text")
-        except Exception:
-            new_text = ""
-
-        old_lines = [ln.strip() for ln in old_text.splitlines() if ln.strip()]
-        new_lines = [ln.strip() for ln in new_text.splitlines() if ln.strip()]
-
-        matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
-        opcodes = matcher.get_opcodes()
-
-        old_rects = []
-        new_rects = []
-        page_summary = {"page": p+1, "added":0, "removed":0, "changed":0}
-
-        # compute px_per_pt once
-        px_old = None
-        px_new = None
-        if old_page:
+        doc = fitz.open(path)
+        parts = []
+        for p in doc:
             try:
-                _, px_old = _page_to_image(old_page, scale=scale)
+                parts.append(p.get_text("text") or "")
             except Exception:
-                px_old = 1.0
-        if new_page:
-            try:
-                _, px_new = _page_to_image(new_page, scale=scale)
-            except Exception:
-                px_new = 1.0
+                parts.append("")
+        doc.close()
+        return "\n".join(parts).strip()
+    except Exception as e:
+        logger.warning("PyMuPDF extract failed: %s", e)
+        return ""
 
-        for tag, i1, i2, j1, j2 in opcodes:
-            old_chunk = " ".join(old_lines[i1:i2]) if i1 < i2 else ""
-            new_chunk = " ".join(new_lines[j1:j2]) if j1 < j2 else ""
+def extract_text(path: str) -> str:
+    text = extract_text_pdfplumber(path)
+    if text:
+        return text
+    return extract_text_pymupdf(path)
 
-            if tag in ("replace", "delete"):
-                if old_page and old_chunk:
-                    rects = _collect_rects_for_phrase(old_page, old_chunk, px_old or 1.0)
-                    if rects:
-                        old_rects.extend(rects)
-                        page_summary["removed"] += 1
-                        totals["removed"] += 1
-                    else:
-                        page_summary["changed"] += 1
-                        totals["changed"] += 1
+# -------------------------
+# OCR (scanned PDFs)
+# -------------------------
+def ocr_pdf_to_text(path: str, dpi: int = 200) -> str:
+    """
+    Convert PDF pages to images, OCR each and return joined text.
+    Requires poppler (pdf2image) and tesseract installed.
+    """
+    texts = []
+    try:
+        images = convert_from_path(path, dpi=dpi)
+        for img in images:
+            txt = pytesseract.image_to_string(img)
+            texts.append(txt)
+        return "\n".join(texts).strip()
+    except Exception as e:
+        logger.exception("OCR failed: %s", e)
+        return ""
 
-            if tag in ("replace", "insert"):
-                if new_page and new_chunk:
-                    rects = _collect_rects_for_phrase(new_page, new_chunk, px_new or 1.0)
-                    if rects:
-                        new_rects.extend(rects)
-                        page_summary["added"] += 1
-                        totals["added"] += 1
-                    else:
-                        page_summary["changed"] += 1
-                        totals["changed"] += 1
+# -------------------------
+# Diffs
+# -------------------------
+def compute_line_diffs(old_text: str, new_text: str) -> Dict[str, List[str]]:
+    """
+    Returns dict with keys 'removed', 'inserted', 'changed' (lines)
+    We derive inserted/removed lines from unified_diff
+    """
+    removed, inserted = [], []
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
+    for line in unified_diff(old_lines, new_lines, lineterm=""):
+        if line.startswith("- ") or line.startswith("---"):
+            # skip headers
+            if line.startswith("- ") and not line.startswith("---"):
+                removed.append(line[2:])
+        elif line.startswith("+ ") or line.startswith("+++"):
+            if line.startswith("+ ") and not line.startswith("+++"):
+                inserted.append(line[2:])
+    return {"removed": removed, "inserted": inserted}
 
-        try:
-            if old_page:
-                img_old, _ = _page_to_image(old_page, scale=scale)
-                annotated_old_images.append(_draw_overlay(img_old, old_rects, RED_FILL))
-            if new_page:
-                img_new, _ = _page_to_image(new_page, scale=scale)
-                annotated_new_images.append(_draw_overlay(img_new, new_rects, GREEN_FILL))
-        except Exception:
-            # if rendering fails, just create a blank placeholder (so page counts still match)
-            w, h = 800, 1000
-            if old_page:
-                annotated_old_images.append(Image.new("RGB", (w, h), (255,255,255)))
-            if new_page:
-                annotated_new_images.append(Image.new("RGB", (w, h), (255,255,255)))
+def generate_text_diff_html(old_text: str, new_text: str) -> str:
+    diff = HtmlDiff(wrapcolumn=100)
+    return diff.make_table(old_text.splitlines(), new_text.splitlines(), fromdesc="Old", todesc="New")
 
-        summary_entries.append(page_summary)
-
-    # file names
-    annotated_old_path = os.path.join(out_dir, f"{prefix}annotated_old.pdf")
-    annotated_new_path = os.path.join(out_dir, f"{prefix}annotated_new.pdf")
-    side_by_side_path = os.path.join(out_dir, f"{prefix}side_by_side.pdf")
-    merged_path = os.path.join(out_dir, f"{prefix}merged_report.pdf")
-    summary_txt_path = os.path.join(out_dir, f"{prefix}summary.txt")
-
-    if annotated_old_images:
-        _save_images_as_pdf(annotated_old_images, annotated_old_path)
-    else:
-        annotated_old_path = None
-    if annotated_new_images:
-        _save_images_as_pdf(annotated_new_images, annotated_new_path)
-    else:
-        annotated_new_path = None
-
-    # side-by-side
-    side_images = []
-    max_pages = max(len(annotated_old_images), len(annotated_new_images))
-    for i in range(max_pages):
-        left = annotated_old_images[i] if i < len(annotated_old_images) else Image.new("RGB", (800, 1000), (255,255,255))
-        right = annotated_new_images[i] if i < len(annotated_new_images) else Image.new("RGB", (800, 1000), (255,255,255))
-        h = max(left.height, right.height)
-        def fit_h(img, h):
-            if img.height == h: return img
-            w = int(img.width * (h / img.height))
-            return img.resize((w,h))
-        L = fit_h(left, h)
-        R = fit_h(right, h)
-        combined = Image.new("RGB", (L.width + R.width, h), (255,255,255))
-        combined.paste(L, (0,0))
-        combined.paste(R, (L.width, 0))
-        side_images.append(combined)
-    if side_images:
-        _save_images_as_pdf(side_images, side_by_side_path)
-
-    # create summary page (reportlab)
-    summary_pdf = os.path.join(out_dir, f"{prefix}summary.pdf")
-    c = canvas.Canvas(summary_pdf, pagesize=letter)
+# -------------------------
+# PDF Generators
+# -------------------------
+def generate_colored_text_pdf(changes: Dict[str, List[str]], out_path: str, title: str = "Changes Summary"):
+    """
+    Create a simple PDF listing removed (red) and inserted (green) lines.
+    This is a safe lightweight annotated textual report.
+    """
+    c = canvas.Canvas(out_path, pagesize=letter)
+    width, height = letter
+    margin = 40
+    y = height - margin
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(40, 750, "PDF DIFF REPORT")
+    c.drawString(margin, y, title)
+    y -= 24
     c.setFont("Helvetica", 10)
-    c.drawString(40, 730, f"Old: {os.path.basename(old_path)}")
-    c.drawString(40, 715, f"New: {os.path.basename(new_path)}")
-    c.drawString(40, 700, f"Totals — Added: {totals['added']}  Removed: {totals['removed']}  Changed: {totals['changed']}")
-    y = 680
-    for ent in summary_entries:
-        c.drawString(45, y, f"Page {ent['page']}: +{ent['added']}  -{ent['removed']}  *{ent['changed']}")
-        y -= 12
-        if y < 80:
+
+    # Removed (red)
+    if changes.get("removed"):
+        c.setFillColorRGB(0.9, 0.2, 0.2)
+        c.drawString(margin, y, "Removed / Changed (in old -> missing in new):")
+        y -= 14
+        c.setFillColorRGB(0, 0, 0)
+        for line in changes["removed"]:
+            if y < 60:
+                c.showPage()
+                y = height - margin
+                c.setFont("Helvetica", 10)
+            # red background box
+            c.setFillColorRGB(1, 0.9, 0.9)
+            c.rect(margin - 2, y - 2, width - 2 * margin + 4, 12, stroke=0, fill=1)
+            c.setFillColorRGB(0.8, 0.0, 0.0)
+            c.drawString(margin, y, (line[:120]))
+            y -= 14
+            c.setFillColorRGB(0, 0, 0)
+
+    # Inserted (green)
+    if changes.get("inserted"):
+        if y < 60:
             c.showPage()
-            y = 740
+            y = height - margin
+        c.setFillColorRGB(0.2, 0.65, 0.2)
+        c.drawString(margin, y, "Inserted / New (present in new PDF):")
+        y -= 14
+        c.setFillColorRGB(0, 0, 0)
+        for line in changes["inserted"]:
+            if y < 60:
+                c.showPage()
+                y = height - margin
+                c.setFont("Helvetica", 10)
+            c.setFillColorRGB(0.95, 1.0, 0.95)
+            c.rect(margin - 2, y - 2, width - 2 * margin + 4, 12, stroke=0, fill=1)
+            c.setFillColorRGB(0.03, 0.55, 0.03)
+            c.drawString(margin, y, (line[:120]))
+            y -= 14
+            c.setFillColorRGB(0, 0, 0)
+
+    c.showPage()
     c.save()
 
-    # merged: summary + annotated_new (or annotated_old if new missing)
-    import fitz
-    merged_doc = fitz.open()
-    merged_doc.insert_pdf(fitz.open(summary_pdf))
-    if annotated_new_path and os.path.exists(annotated_new_path):
-        merged_doc.insert_pdf(fitz.open(annotated_new_path))
-    elif annotated_old_path and os.path.exists(annotated_old_path):
-        merged_doc.insert_pdf(fitz.open(annotated_old_path))
-    merged_doc.save(merged_path)
-    merged_doc.close()
+def make_side_by_side_pdf(old_pdf: str, new_pdf: str, out_path: str, max_pages: int = None, dpi: int = 150):
+    """
+    Convert each PDF page to images and place side-by-side.
+    This is robust and works for scanned and normal PDFs.
+    """
+    # convert pages
+    old_images = convert_from_path(old_pdf, dpi=dpi)
+    new_images = convert_from_path(new_pdf, dpi=dpi)
 
-    # write summary text
-    with open(summary_txt_path, "w", encoding="utf-8") as fh:
-        fh.write(f"Generated: {datetime.utcnow().isoformat()} UTC\n")
-        fh.write(f"Old: {old_path}\nNew: {new_path}\n")
-        fh.write(f"Totals — Added: {totals['added']}  Removed: {totals['removed']}  Changed: {totals['changed']}\n")
-        for ent in summary_entries:
-            fh.write(f"Page {ent['page']}: +{ent['added']}  -{ent['removed']}  *{ent['changed']}\n")
+    if max_pages:
+        old_images = old_images[:max_pages]
+        new_images = new_images[:max_pages]
 
-    outputs = {
-        "annotated_old": os.path.basename(annotated_old_path) if annotated_old_path else None,
-        "annotated_new": os.path.basename(annotated_new_path) if annotated_new_path else None,
-        "merged": os.path.basename(merged_path),
-        "side_by_side": os.path.basename(side_by_side_path) if os.path.exists(side_by_side_path) else None,
-        "summary": os.path.basename(summary_txt_path),
+    # pad one list to the other in case of different page counts
+    n = max(len(old_images), len(new_images))
+    while len(old_images) < n:
+        old_images.append(Image.new("RGB", new_images[0].size, (255, 255, 255)))
+    while len(new_images) < n:
+        new_images.append(Image.new("RGB", old_images[0].size, (255, 255, 255)))
+
+    # Create PDF with side-by-side images using reportlab canvas
+    c = canvas.Canvas(out_path, pagesize=letter)
+    page_w, page_h = letter
+    margin = 20
+
+    for oimg, nimg in zip(old_images, new_images):
+        # scale images to fit half page
+        half_w = (page_w - 3 * margin) / 2
+        max_h = page_h - 2 * margin
+
+        # compute scaling
+        o_w, o_h = oimg.size
+        scale_o = min(half_w / o_w, max_h / o_h)
+        n_w, n_h = nimg.size
+        scale_n = min(half_w / n_w, max_h / n_h)
+
+        # resize for embedding
+        o_resized = oimg.resize((int(o_w * scale_o), int(o_h * scale_o)))
+        n_resized = nimg.resize((int(n_w * scale_n), int(n_h * scale_n)))
+
+        # temp files
+        tmp_o = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        tmp_n = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        try:
+            o_resized.save(tmp_o.name, format="PNG")
+            n_resized.save(tmp_n.name, format="PNG")
+
+            # left image
+            left_x = margin
+            left_y = page_h - margin - o_resized.size[1]
+            c.drawImage(tmp_o.name, left_x, left_y, width=o_resized.size[0], height=o_resized.size[1])
+
+            # right image
+            right_x = margin * 2 + half_w
+            right_y = page_h - margin - n_resized.size[1]
+            c.drawImage(tmp_n.name, right_x, right_y, width=n_resized.size[0], height=n_resized.size[1])
+
+            # footer labels
+            c.setFont("Helvetica", 8)
+            c.drawString(left_x, margin / 2 + 5, "Old PDF")
+            c.drawString(right_x, margin / 2 + 5, "New PDF")
+
+            c.showPage()
+        finally:
+            tmp_o.close()
+            tmp_n.close()
+            try:
+                os.unlink(tmp_o.name)
+                os.unlink(tmp_n.name)
+            except Exception:
+                pass
+
+    c.save()
+
+# -------------------------
+# Top-level orchestrator
+# -------------------------
+def compare_pdfs(
+    old_pdf: str,
+    new_pdf: str,
+    output_folder: str,
+    do_ocr: bool = False,
+    enable_page_annotations: bool = False,
+    prefix: str = ""
+) -> Dict[str, str]:
+    """
+    Compare two PDFs and generate:
+      - annotated_text_report.pdf  (colored removed/inserted lines)
+      - side_by_side.pdf
+      - merged_report.pdf (summary + side_by_side)
+    Returns dict with output file paths.
+    """
+
+    ensure_dirs([output_folder])
+    # 1) Extract text
+    old_text = extract_text(old_pdf)
+    new_text = extract_text(new_pdf)
+
+    # If both empty and OCR allowed -> run OCR
+    if not old_text and not new_text and do_ocr:
+        # OCR both
+        old_text = ocr_pdf_to_text(old_pdf) or ""
+        new_text = ocr_pdf_to_text(new_pdf) or ""
+
+    # If still empty: warn and proceed with image-only side-by-side
+    if not old_text and not new_text:
+        logger.info("No extractable text found; generating side-by-side only")
+        sb_path = os.path.join(output_folder, f"{prefix}side_by_side.pdf")
+        make_side_by_side_pdf(old_pdf, new_pdf, sb_path)
+        return {
+            "side_by_side": sb_path,
+            "annotated_text_report": "",
+            "merged_report": sb_path
+        }
+
+    # 2) Compute diffs
+    diffs = compute_line_diffs(old_text, new_text)
+
+    # 3) Create annotated textual PDF summary
+    annotated_text_path = os.path.join(output_folder, f"{prefix}annotated_text_report.pdf")
+    generate_colored_text_pdf(diffs, annotated_text_path, title="PDF Diff - Textual Summary")
+
+    # 4) Create side-by-side PDF (images)
+    side_by_side_path = os.path.join(output_folder, f"{prefix}side_by_side.pdf")
+    make_side_by_side_pdf(old_pdf, new_pdf, side_by_side_path)
+
+    # 5) Create merged report: first page embed annotated_text_report as page, then side-by-side pages
+    merged_path = os.path.join(output_folder, f"{prefix}merged_report.pdf")
+    try:
+        # We'll append pages by converting annotated_text_report to an image and then adding
+        # (Simpler: create a new PDF that first draws annotated text report as one page (embedding PDF as image)
+        # then embed each side_by_side page image. Here we just create a simple merged PDF:
+        c = canvas.Canvas(merged_path, pagesize=letter)
+        # Summary page (draw a title and note)
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(40, 750, "PDF DIFF - Merged Report")
+        c.setFont("Helvetica", 10)
+        c.drawString(40, 730, f"Generated summary (text diff) and side-by-side pages.")
+        c.showPage()
+
+        # Then insert the annotated_text_report as a single page image snapshot
+        # fallback: draw text lines from annotated_text_report (since reading PDF pages requires PyPDF2)
+        # Read annotated_text_report page images via pdf2image and place them
+        preview_images = convert_from_path(annotated_text_path, dpi=150)
+        for img in preview_images:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            try:
+                img.save(tmp.name, format="PNG")
+                page_w, page_h = letter
+                img_w, img_h = img.size
+                scale = min((page_w - 80) / img_w, (page_h - 80) / img_h)
+                w = img_w * scale
+                h = img_h * scale
+                x = (page_w - w) / 2
+                y = (page_h - h) / 2
+                c.drawImage(tmp.name, x, y, width=w, height=h)
+                c.showPage()
+            finally:
+                tmp.close()
+                try:
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
+
+        # Append side-by-side pages too (as images)
+        sb_images = convert_from_path(side_by_side_path, dpi=150)
+        for img in sb_images:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            try:
+                img.save(tmp.name, format="PNG")
+                page_w, page_h = letter
+                img_w, img_h = img.size
+                scale = min((page_w - 80) / img_w, (page_h - 80) / img_h)
+                w = img_w * scale
+                h = img_h * scale
+                x = (page_w - w) / 2
+                y = (page_h - h) / 2
+                c.drawImage(tmp.name, x, y, width=w, height=h)
+                c.showPage()
+            finally:
+                tmp.close()
+                try:
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
+
+        c.save()
+    except Exception as e:
+        logger.exception("Failed building merged report: %s", e)
+        # fallback to side_by_side as merged
+        merged_path = side_by_side_path
+
+    results = {
+        "annotated_text_report": annotated_text_path,
+        "side_by_side": side_by_side_path,
+        "merged_report": merged_path
     }
-    return outputs
+
+    # Optional: attempt to annotate actual new PDF pages (heavy)
+    if enable_page_annotations:
+        try:
+            annotated_new_pdf = os.path.join(output_folder, f"{prefix}annotated_new_pdf_with_boxes.pdf")
+            _annotate_new_pdf_as_images(new_pdf, diffs, annotated_new_pdf)
+            results["annotated_new_pdf"] = annotated_new_pdf
+        except Exception:
+            logger.exception("Page-level annotation failed; skipped.")
+    return results
+
+# -------------------------
+# Optional heavy function:
+# convert pages to images and draw boxes near text lines in new PDF (if run on a powerful host)
+# -------------------------
+def _annotate_new_pdf_as_images(pdf_path: str, diffs: dict, out_pdf: str, dpi: int = 150):
+    """
+    Convert pages into images and overlay bounding boxes near lines found in diffs.
+    This function is optional and heavy. Use enable_page_annotations only if you have good RAM.
+    """
+    ensure_dirs([os.path.dirname(out_pdf) or "."])
+    # get page images
+    images = convert_from_path(pdf_path, dpi=dpi)
+    # use PyMuPDF to search for text positions
+    doc = fitz.open(pdf_path)
+    out_images = []
+    for pnum, img in enumerate(images):
+        draw = ImageDraw.Draw(img, "RGBA")
+        if pnum < len(doc):
+            page = doc[pnum]
+            page_w = page.rect.width
+            page_h = page.rect.height
+            # for each inserted/removed line try to find rects and overlay
+            for line in diffs.get("inserted", []) + diffs.get("removed", []):
+                if not line.strip():
+                    continue
+                try:
+                    rects = page.search_for(line, hit_max=50)
+                except Exception:
+                    rects = []
+                for r in rects:
+                    # map page coordinates to image coords
+                    # fitz uses points; image width maps to page width
+                    img_w, img_h = img.size
+                    fx = img_w / page_w
+                    fy = img_h / page_h
+                    x0 = r.x0 * fx
+                    y0 = r.y0 * fy
+                    x1 = r.x1 * fx
+                    y1 = r.y1 * fy
+                    # PyMuPDF y origin might be top-left or bottom-left — if boxes look inverted, swap
+                    # Use semi-transparent fill
+                    color = (0, 255, 0, 120) if line in diffs.get("inserted", []) else (255, 0, 0, 120)
+                    draw.rectangle([x0, y0, x1, y1], fill=color)
+        out_images.append(img)
+
+    # save images into a PDF
+    out_images[0].save(out_pdf, save_all=True, append_images=out_images[1:])
+
 
 
 
