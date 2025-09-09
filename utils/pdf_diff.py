@@ -1,275 +1,325 @@
 import os
 import io
-import fitz  # pymupdf
+import re
+import fitz  # PyMuPDF
 import difflib
+from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-from reportlab.lib import colors
+from datetime import datetime
 
-def ensure_dirs(paths):
-    for p in paths:
-        os.makedirs(p, exist_ok=True)
+# --- helpers
+def ensure_dirs(dirs):
+    for d in dirs:
+        os.makedirs(d, exist_ok=True)
 
-def normalize_text(s):
-    return " ".join(s.split())
-
-def extract_words_by_page(pdf_path):
+def generate_sample_pdfs(old_path, new_path):
     """
-    Returns list of pages; each page is list of (word_text, rect)
-    rect is (x0,y0,x1,y1) in points (PDF coordinate)
+    Create very small sample PDFs (reportlab) if not present.
     """
-    doc = fitz.open(pdf_path)
-    pages = []
-    for p in doc:
-        words = p.get_text("words")  # list of (x0, y0, x1, y1, "word", block_no, line_no, word_no)
-        page_words = []
-        for w in words:
-            x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
-            page_words.append((text, (x0, y0, x1, y1)))
-        pages.append(page_words)
-    doc.close()
-    return pages
+    if not os.path.exists(old_path):
+        c = canvas.Canvas(old_path, pagesize=letter)
+        c.setFont("Helvetica", 12)
+        c.drawString(50, 700, "OLD CHARTS - SAMPLE")
+        c.drawString(50, 680, "MDA  300  VIS  800m   RVR  1200")
+        c.drawString(50, 640, "Waypoint ABC  Alt 5000")
+        c.save()
+    if not os.path.exists(new_path):
+        c = canvas.Canvas(new_path, pagesize=letter)
+        c.setFont("Helvetica", 12)
+        c.drawString(50, 700, "NEW CHARTS - SAMPLE")
+        c.drawString(50, 680, "MDA  280  VIS  800m   RVR  1200")  # changed value
+        c.drawString(50, 640, "Waypoint ABC  Alt 5200")  # changed value
+        c.save()
 
-def page_text_list(page_words):
-    return [w[0] for w in page_words]
+# color helpers (RGBA)
+RED_FILL = (220, 40, 40, 128)
+GREEN_FILL = (20, 160, 60, 128)
 
-def find_word_rects(page_obj, word):
-    # uses search_for to be safer for multi occurrences
-    rects = page_obj.search_for(str(word))
+def _page_to_image(page, scale=2.0):
+    """Render page to PIL image. Returns PIL.Image (RGB) and pixel scale (px per point)."""
+    mat = fitz.Matrix(scale, scale)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    mode = "RGB"
+    img = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+    px_per_pt = pix.width / page.rect.width
+    return img, px_per_pt
+
+def _words_by_coords(page):
+    """
+    Returns list of dicts: [{'text': w, 'rect': (x0,y0,x1,y1)}, ...]
+    coordinates in PDF points (origin top-left).
+    """
+    words = page.get_text("words")  # list of tuples
+    res = []
+    for w in words:
+        x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+        res.append({"text": text, "rect": (x0, y0, x1, y1)})
+    return res
+
+def _collect_rects_for_chunk(page, chunk_text, used_indices, px_per_pt, scale=1.0):
+    """
+    Try to find bounding rects on `page` for chunk_text.
+    1) Try page.search_for (phrase search)
+    2) Fallback to scanning words and matching tokens
+    Returns list of rectangles in pixel coords [(x0,y0,x1,y1), ...]
+    """
+    rects = []
+    if not chunk_text or not page:
+        return rects
+
+    phrase = chunk_text.strip()
+    if len(phrase) > 1:
+        try:
+            hits = page.search_for(phrase, hit_max=32)
+            for r in hits:
+                rects.append((r.x0*px_per_pt, r.y0*px_per_pt, r.x1*px_per_pt, r.y1*px_per_pt))
+            if rects:
+                return rects
+        except Exception:
+            pass
+
+    # fallback: word scanning
+    words = page.get_text("words")  # (x0,y0,x1,y1, word, blockno, line_no, wordno)
+    tokens = re.findall(r"\w+[\w\-/\.]*", phrase)
+    if not tokens:
+        return rects
+
+    # map token -> word entries indices
+    for t in tokens:
+        t_low = t.lower()
+        for i,w in enumerate(words):
+            if i in used_indices: 
+                continue
+            word_txt = str(w[4])
+            if word_txt.lower() == t_low:
+                used_indices.add(i)
+                rects.append((w[0]*px_per_pt, w[1]*px_per_pt, w[2]*px_per_pt, w[3]*px_per_pt))
+                break
     return rects
 
-def annotate_pdf(base_pdf_path, highlights_by_page, color_rgb=(1,0,0), opacity=0.35, out_path=None, cover_full_page_for_missing=False):
+def _draw_overlay(img, rects, color):
+    """Draw semi-transparent rectangles onto a copy of img."""
+    overlay = Image.new("RGBA", img.size, (255,255,255,0))
+    draw = ImageDraw.Draw(overlay)
+    for (x0,y0,x1,y1) in rects:
+        draw.rectangle([x0, y0, x1, y1], fill=color, outline=None)
+    composed = Image.alpha_composite(img.convert("RGBA"), overlay)
+    return composed.convert("RGB")
+
+def _save_images_as_pdf(images, out_path, dpi=150):
+    if not images:
+        return None
+    # PIL can save multi-page PDF
+    first, rest = images[0], images[1:]
+    first.save(out_path, "PDF", resolution=dpi, save_all=True, append_images=rest)
+
+# --- main compare routine
+def compare_pdfs(old_path, new_path, out_dir, prefix=""):
     """
-    highlights_by_page: dict[page_index] -> list of (rect, label)
-    rect is fitz.Rect or (x0,y0,x1,y1)
+    Compare two PDFs and produce:
+      - annotated_old.pdf
+      - annotated_new.pdf
+      - merged_report.pdf  (summary + annotated_new)
+      - side_by_side.pdf
+    Returns paths dict.
     """
-    doc = fitz.open(base_pdf_path)
-    for p_idx in highlights_by_page:
-        if p_idx < 0 or p_idx >= doc.page_count:
-            continue
-        page = doc[p_idx]
-        for rect, label in highlights_by_page[p_idx]:
-            r = fitz.Rect(rect)
-            # draw semi-transparent rectangle
-            annot = page.add_rect_annot(r)
-            annot.set_colors(stroke=None, fill=color_rgb)
-            annot.set_opacity(opacity)
-            annot.update()
-            # add a popup text in popup note (so the PDF viewer can see text)
-            # We'll also add a small text annotation on top-left as plain text
-            # Add optional text label
-            if label:
-                # small text at top-left of rect
-                tx = fitz.Point(r.x0 + 2, r.y0 + 8)
-                page.insert_text(tx, str(label), fontsize=6, color=(0,0,0))
-    if out_path:
-        doc.save(out_path, garbage=4, deflate=True)
-        doc.close()
-        return out_path
-    else:
-        out_buf = doc.write()
-        doc.close()
-        return out_buf
+    ensure_dirs([out_dir])
+    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    prefix = prefix or f"{ts}_"
 
-def build_summary_page(summary_items, out_path):
-    """
-    summary_items: list of dict rows, e.g. [{"page":1,"type":"changed","old":"X","new":"Y"}, ...]
-    Creates a one-page PDF with summary table appended.
-    """
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(40, height - 40, "PDF Comparison Summary")
-    c.setFont("Helvetica", 10)
-    y = height - 70
-    row_h = 16
-    c.drawString(40, y, "Page")
-    c.drawString(80, y, "Type")
-    c.drawString(140, y, "Old snippet")
-    c.drawString(360, y, "New snippet")
-    y -= row_h
-    for it in summary_items:
-        if y < 60:
-            c.showPage()
-            y = height - 40
-        c.drawString(40, y, str(it.get("page","-")))
-        c.drawString(80, y, it.get("type",""))
-        old = (it.get("old","")[:40] + "...") if len(it.get("old",""))>43 else it.get("old","")
-        new = (it.get("new","")[:40] + "...") if len(it.get("new",""))>43 else it.get("new","")
-        c.drawString(140, y, old)
-        c.drawString(360, y, new)
-        y -= row_h
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    with open(out_path, "wb") as f:
-        f.write(buffer.read())
-    return out_path
+    old_doc = fitz.open(old_path)
+    new_doc = fitz.open(new_path)
+    page_count = max(len(old_doc), len(new_doc))
 
-def merge_pdfs(paths, out_path):
-    out_doc = fitz.open()
-    for p in paths:
-        doc = fitz.open(p)
-        out_doc.insert_pdf(doc)
-        doc.close()
-    out_doc.save(out_path)
-    out_doc.close()
-    return out_path
+    annotated_old_images = []
+    annotated_new_images = []
 
-def compare_pdfs(old_pdf_path, new_pdf_path, output_dir, prefix=""):
-    """
-    Returns: annotated_merged_path, side_by_side_pdf_path, summary_pdf_path, preview_data
-    preview_data: JSON-ready dict with page-wise old_text/new_text and diffs for browser preview
-    """
-    ensure_dirs([output_dir])
-    old_pages = extract_words_by_page(old_pdf_path)
-    new_pages = extract_words_by_page(new_pdf_path)
+    summary_entries = []  # per page summary
+    global_changes = {"added":0, "removed":0, "changed":0}
 
-    # Basic approach: compare text by page index; if pages differ in count, handle gracefully
-    max_pages = max(len(old_pages), len(new_pages))
+    # We'll track used indices for robust mapping
+    for p in range(page_count):
+        old_page = old_doc.load_page(p) if p < len(old_doc) else None
+        new_page = new_doc.load_page(p) if p < len(new_doc) else None
 
-    doc_old = fitz.open(old_pdf_path)
-    doc_new = fitz.open(new_pdf_path)
+        old_text = old_page.get_text("text") if old_page else ""
+        new_text = new_page.get_text("text") if new_page else ""
 
-    # highlights structures: page_index -> list[(rect,label)]
-    highlights_old = {}
-    highlights_new = {}
-    summary_items = []
-    preview = {"pages": []}
+        old_lines = [ln.strip() for ln in old_text.splitlines() if ln.strip()]
+        new_lines = [ln.strip() for ln in new_text.splitlines() if ln.strip()]
 
-    for i in range(max_pages):
-        old_page_words = old_pages[i] if i < len(old_pages) else []
-        new_page_words = new_pages[i] if i < len(new_pages) else []
+        # compute line-level opcodes
+        matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
+        opcodes = matcher.get_opcodes()
 
-        old_texts = page_text_list(old_page_words)
-        new_texts = page_text_list(new_page_words)
+        # prepare used index sets and rect lists
+        old_used = set()
+        new_used = set()
+        old_rects = []
+        new_rects = []
+        page_summary = {"page": p+1, "added":0, "removed":0, "changed":0}
 
-        # perform a sequence matcher on word lists
-        sm = difflib.SequenceMatcher(a=old_texts, b=new_texts, autojunk=False)
-        old_page_obj = doc_old[i] if i < doc_old.page_count else None
-        new_page_obj = doc_new[i] if i < doc_new.page_count else None
-
-        page_preview = {"page_index": i, "old_text": " ".join(old_texts), "new_text": " ".join(new_texts), "diffs": []}
-
-        for tag, a0, a1, b0, b1 in sm.get_opcodes():
+        # For each opcode, collect mapped rects for changed/added/removed chunks
+        for tag, i1, i2, j1, j2 in opcodes:
             if tag == "equal":
-                # nothing to highlight
                 continue
-            elif tag == "replace":
-                # old words removed/changed -> highlight on old in RED
-                # new words inserted/changed -> highlight on new in GREEN
-                # collect snippet for summary
-                old_snip = " ".join(old_texts[a0:a1])
-                new_snip = " ".join(new_texts[b0:b1])
-                summary_items.append({"page": i+1, "type": "replace", "old": old_snip, "new": new_snip})
-                page_preview["diffs"].append({"type": "replace", "old": old_snip, "new": new_snip})
+            old_chunk = " ".join(old_lines[i1:i2]) if i1 < i2 else ""
+            new_chunk = " ".join(new_lines[j1:j2]) if j1 < j2 else ""
+            if tag in ("replace", "delete"):
+                # mark old_chunk as removed/changed
+                found = []
+                if old_page and old_chunk:
+                    found = _collect_rects_for_chunk(old_page, old_chunk, old_used, px_per_pt=_page_to_image(old_page)[1])
+                if not found and old_page:
+                    # fallback: highlight blocks from page.get_text("blocks")
+                    blocks = old_page.get_text("blocks")
+                    for b in blocks:
+                        txt = str(b[4]).strip()
+                        if len(txt)>2 and (txt in old_chunk or old_chunk in txt or len(old_chunk)>0 and txt.lower().find(old_chunk[:20].lower())!=-1):
+                            r = (b[0]*_page_to_image(old_page)[1], b[1]*_page_to_image(old_page)[1],
+                                 b[2]*_page_to_image(old_page)[1], b[3]*_page_to_image(old_page)[1])
+                            found.append(r)
+                if found:
+                    old_rects.extend(found)
+                    page_summary["removed"] += 1
+                    global_changes["removed"] += 1
+                else:
+                    # no mapping -> small full-block fallback (do not mark whole page)
+                    # we mark nothing but register as changed
+                    page_summary["changed"] += 1
+                    global_changes["changed"] += 1
 
-                # find rects for old words
-                if old_page_obj:
-                    for w in old_texts[a0:a1]:
-                        rects = old_page_obj.search_for(str(w))
-                        for r in rects:
-                            highlights_old.setdefault(i, []).append(((r.x0, r.y0, r.x1, r.y1), f"OLD:{w}"))
-                if new_page_obj:
-                    for w in new_texts[b0:b1]:
-                        rects = new_page_obj.search_for(str(w))
-                        for r in rects:
-                            highlights_new.setdefault(i, []).append(((r.x0, r.y0, r.x1, r.y1), f"NEW:{w}"))
+            if tag in ("replace", "insert"):
+                # mark new_chunk as added/changed
+                found = []
+                if new_page and new_chunk:
+                    found = _collect_rects_for_chunk(new_page, new_chunk, new_used, px_per_pt=_page_to_image(new_page)[1])
+                if not found and new_page:
+                    blocks = new_page.get_text("blocks")
+                    for b in blocks:
+                        txt = str(b[4]).strip()
+                        if len(txt)>2 and (txt in new_chunk or new_chunk in txt or len(new_chunk)>0 and txt.lower().find(new_chunk[:20].lower())!=-1):
+                            r = (b[0]*_page_to_image(new_page)[1], b[1]*_page_to_image(new_page)[1],
+                                 b[2]*_page_to_image(new_page)[1], b[3]*_page_to_image(new_page)[1])
+                            found.append(r)
+                if found:
+                    new_rects.extend(found)
+                    page_summary["added"] += 1
+                    global_changes["added"] += 1
+                else:
+                    page_summary["changed"] += 1
+                    global_changes["changed"] += 1
 
-            elif tag == "delete":
-                old_snip = " ".join(old_texts[a0:a1])
-                summary_items.append({"page": i+1, "type": "delete", "old": old_snip, "new": ""})
-                page_preview["diffs"].append({"type": "delete", "old": old_snip})
-                if old_page_obj:
-                    for w in old_texts[a0:a1]:
-                        rects = old_page_obj.search_for(str(w))
-                        for r in rects:
-                            highlights_old.setdefault(i, []).append(((r.x0, r.y0, r.x1, r.y1), f"OLD:{w}"))
-            elif tag == "insert":
-                new_snip = " ".join(new_texts[b0:b1])
-                summary_items.append({"page": i+1, "type": "insert", "old": "", "new": new_snip})
-                page_preview["diffs"].append({"type": "insert", "new": new_snip})
-                if new_page_obj:
-                    for w in new_texts[b0:b1]:
-                        rects = new_page_obj.search_for(str(w))
-                        for r in rects:
-                            highlights_new.setdefault(i, []).append(((r.x0, r.y0, r.x1, r.y1), f"NEW:{w}"))
+        # render old and new page images and draw rects
+        scale = 2.0
+        if old_page:
+            img_old, px_per_pt_old = _page_to_image(old_page, scale=scale)
+            if old_rects:
+                composed = _draw_overlay(img_old, old_rects, RED_FILL)
+            else:
+                composed = img_old
+            annotated_old_images.append(composed)
 
-        preview["pages"].append(page_preview)
+        if new_page:
+            img_new, px_per_pt_new = _page_to_image(new_page, scale=scale)
+            if new_rects:
+                composed = _draw_overlay(img_new, new_rects, GREEN_FILL)
+            else:
+                composed = img_new
+            annotated_new_images.append(composed)
 
-    # Create annotated PDFs
-    annotated_old = os.path.join(output_dir, f"{prefix}annotated_old.pdf")
-    annotated_new = os.path.join(output_dir, f"{prefix}annotated_new.pdf")
-    # annotate old (red) and new (green)
-    annotate_pdf(old_pdf_path, highlights_old, color_rgb=(1,0.2,0.2), opacity=0.45, out_path=annotated_old)
-    annotate_pdf(new_pdf_path, highlights_new, color_rgb=(0.2,0.8,0.3), opacity=0.45, out_path=annotated_new)
+        summary_entries.append(page_summary)
 
-    # merged output: summary page + annotated new (so analyst sees summary then pages)
-    summary_pdf = os.path.join(output_dir, f"{prefix}summary.pdf")
-    build_summary_page(summary_items, summary_pdf)
+    # Save annotated PDFs
+    annotated_old_path = os.path.join(out_dir, f"{prefix}annotated_old.pdf")
+    annotated_new_path = os.path.join(out_dir, f"{prefix}annotated_new.pdf")
+    side_by_side_path = os.path.join(out_dir, f"{prefix}side_by_side.pdf")
+    merged_path = os.path.join(out_dir, f"{prefix}merged_report.pdf")
+    summary_path = os.path.join(out_dir, f"{prefix}summary.txt")
 
-    merged_path = os.path.join(output_dir, f"{prefix}merged_report.pdf")
-    merge_pdfs([summary_pdf, annotated_new], merged_path)
+    if annotated_old_images:
+        _save_images_as_pdf(annotated_old_images, annotated_old_path)
+    else:
+        annotated_old_path = None
+    if annotated_new_images:
+        _save_images_as_pdf(annotated_new_images, annotated_new_path)
+    else:
+        annotated_new_path = None
 
-    # side-by-side PDF (two-column pages)
-    side_by_side_path = os.path.join(output_dir, f"{prefix}side_by_side.pdf")
-    create_side_by_side_pdf(old_pdf_path, new_pdf_path, side_by_side_path)
-
-    # We'll return the merged annotated new PDF as 'annotated' for convenience
-    return merged_path, side_by_side_path, summary_pdf, preview
-
-def create_side_by_side_pdf(old_pdf, new_pdf, out_path):
-    """
-    Build side-by-side pages by rasterizing each page and placing left/right
-    """
-    doc_old = fitz.open(old_pdf)
-    doc_new = fitz.open(new_pdf)
-    max_pages = max(doc_old.page_count, doc_new.page_count)
-    out_doc = fitz.open()
-
+    # side-by-side: combine page images horizontally
+    side_images = []
+    max_pages = max(len(annotated_old_images), len(annotated_new_images))
     for i in range(max_pages):
-        # render images
-        if i < doc_old.page_count:
-            pix_old = doc_old[i].get_pixmap(matrix=fitz.Matrix(2,2))
-        else:
-            # blank
-            pix_old = fitz.Pixmap(fitz.csRGB, 1, 1, 255)
-        if i < doc_new.page_count:
-            pix_new = doc_new[i].get_pixmap(matrix=fitz.Matrix(2,2))
-        else:
-            pix_new = fitz.Pixmap(fitz.csRGB, 1, 1, 255)
+        left = annotated_old_images[i] if i < len(annotated_old_images) else Image.new("RGB", (800, 1000), (255,255,255))
+        right = annotated_new_images[i] if i < len(annotated_new_images) else Image.new("RGB", (800, 1000), (255,255,255))
+        # normalize heights
+        h = max(left.height, right.height)
+        def fit_h(img, h):
+            if img.height == h:
+                return img
+            w = int(img.width * (h / img.height))
+            return img.resize((w, h))
+        L = fit_h(left, h)
+        R = fit_h(right, h)
+        combined = Image.new("RGB", (L.width + R.width, h), (255,255,255))
+        combined.paste(L, (0,0))
+        combined.paste(R, (L.width, 0))
+        side_images.append(combined)
+    if side_images:
+        _save_images_as_pdf(side_images, side_by_side_path)
 
-        # create new page wide enough
-        w = pix_old.width + pix_new.width
-        h = max(pix_old.height, pix_new.height)
-        page = out_doc.new_page(width=w, height=h)
-        page.insert_image(fitz.Rect(0,0,pix_old.width, pix_old.height), pixmap=pix_old)
-        page.insert_image(fitz.Rect(pix_old.width,0, pix_old.width+pix_new.width, pix_new.height), pixmap=pix_new)
-
-    out_doc.save(out_path)
-    out_doc.close()
-    doc_old.close()
-    doc_new.close()
-    return out_path
-
-# Optional helper to generate sample PDFs for testing
-def generate_sample_pdfs(outdir):
-    ensure_dirs([outdir])
-    sample_old = os.path.join(outdir, "sample_old.pdf")
-    sample_new = os.path.join(outdir, "sample_new.pdf")
-    # create minimal PDFs
-    c = canvas.Canvas(sample_old, pagesize=letter)
-    c.drawString(72, 700, "Instrument Approach Chart - OLD")
-    c.drawString(72, 660, "MDA: 600")
-    c.drawString(72, 640, "VIS: 5km")
+    # merged_report: first page = summary (reportlab), then append annotated_new pages if exist
+    # create single-page summary PDF
+    summary_pdf_path = os.path.join(out_dir, f"{prefix}summary.pdf")
+    c = canvas.Canvas(summary_pdf_path, pagesize=letter)
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(40, 750, "PDF DIFF REPORT")
+    c.setFont("Helvetica", 11)
+    c.drawString(40, 730, f"Generated: {datetime.utcnow().isoformat()} UTC")
+    c.drawString(40, 710, f"Old: {os.path.basename(old_path)}")
+    c.drawString(40, 695, f"New: {os.path.basename(new_path)}")
+    c.drawString(40, 675, f"Totals — Added: {global_changes['added']}  Removed: {global_changes['removed']}  Changed: {global_changes['changed']}")
+    y = 640
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y, "Page-wise summary:")
+    y -= 18
+    c.setFont("Helvetica", 10)
+    for ent in summary_entries:
+        c.drawString(45, y, f"Page {ent['page']}: +{ent['added']}  -{ent['removed']}  *{ent['changed']}")
+        y -= 14
+        if y < 80:
+            c.showPage()
+            y = 740
     c.save()
-    c = canvas.Canvas(sample_new, pagesize=letter)
-    c.drawString(72, 700, "Instrument Approach Chart - NEW")
-    c.drawString(72, 660, "MDA: 620")  # changed
-    c.drawString(72, 640, "VIS: 5km")
-    c.save()
-    return sample_old, sample_new
+
+    # merge summary + annotated_new into merged_report using PyMuPDF (fast)
+    merged_doc = fitz.open()
+    merged_doc.insert_pdf(fitz.open(summary_pdf_path))
+    if annotated_new_path and os.path.exists(annotated_new_path):
+        merged_doc.insert_pdf(fitz.open(annotated_new_path))
+    elif annotated_old_path and os.path.exists(annotated_old_path):
+        merged_doc.insert_pdf(fitz.open(annotated_old_path))
+    merged_doc.save(merged_path)
+    merged_doc.close()
+
+    # write a small textual summary
+    with open(summary_path, "w", encoding="utf-8") as fh:
+        fh.write(f"Generated: {datetime.utcnow().isoformat()} UTC\n")
+        fh.write(f"Old: {old_path}\nNew: {new_path}\n\n")
+        fh.write(f"Totals — Added: {global_changes['added']}  Removed: {global_changes['removed']}  Changed: {global_changes['changed']}\n\n")
+        for ent in summary_entries:
+            fh.write(f"Page {ent['page']}: +{ent['added']}  -{ent['removed']}  *{ent['changed']}\n")
+
+    outputs = {
+        "annotated_old": os.path.basename(annotated_old_path) if annotated_old_path else None,
+        "annotated_new": os.path.basename(annotated_new_path) if annotated_new_path else None,
+        "merged": os.path.basename(merged_path),
+        "side_by_side": os.path.basename(side_by_side_path),
+        "summary": os.path.basename(summary_path),
+    }
+    return outputs
+
 
 
 
