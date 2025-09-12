@@ -1,7 +1,14 @@
 Flask==3.0.3
-reportlab==4.2.5
-pdf2image==1.17.0
+gunicorn==21.2.0
+
+# OCR and PDF tools
+PyMuPDF==1.23.8       # last good release with prebuilt wheels
 pytesseract==0.3.10
-PyMuPDF==1.23.6
-Pillow==10.2.0
-Werkzeug==3.0.2
+pdf2image==1.17.0
+Pillow==10.3.0
+
+# Extra utilities
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+reportlab==4.2.2
+
