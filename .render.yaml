@@ -2,10 +2,11 @@ services:
   - type: web
     name: pdf-diff-tool
     env: python
-    region: oregon
+    runtime: python-3.11
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: gunicorn app:app
     plan: free
-    buildCommand: |
-      apt-get update && apt-get
+
 
 
 
