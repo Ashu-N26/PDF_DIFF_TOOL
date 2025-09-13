@@ -1,14 +1,14 @@
-Flask==3.0.3
+Flask==2.3.3
 gunicorn==21.2.0
+Werkzeug==2.3.7
 
-# OCR and PDF tools
-PyMuPDF==1.23.8       # last good release with prebuilt wheels
+# PDF & OCR
+pymupdf==1.23.3
+pdf2image==1.16.3
 pytesseract==0.3.10
-pdf2image==1.17.0
-Pillow==10.3.0
+Pillow==9.5.0
 
-# Extra utilities
-numpy==1.26.4
-opencv-python-headless==4.10.0.84
-reportlab==4.2.2
+# Utilities
+python-dotenv==1.0.0
+
 
