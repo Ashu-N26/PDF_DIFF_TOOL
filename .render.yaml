@@ -1,13 +1,18 @@
 services:
   - type: web
     name: pdf-diff-tool
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    env: docker
+    plan: free          # change to 'starter' or higher if OCR needs more RAM
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: PORT
+        value: "8000"
+
 
 
 
