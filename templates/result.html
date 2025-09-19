@@ -2,22 +2,35 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Results - PDF Diff</title>
+  <title>Comparison Result - Advanced</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="container">
-    <h1>Comparison Results</h1>
-    <p>Download outputs:</p>
-    <ul>
-      <li><a href="{{ url_for('download_file', filename=outputs.annotated_old) }}">{{ outputs.annotated_old }}</a></li>
-      <li><a href="{{ url_for('download_file', filename=outputs.annotated_new) }}">{{ outputs.annotated_new }}</a></li>
-      <li><a href="{{ url_for('download_file', filename=outputs.side_by_side) }}">{{ outputs.side_by_side }}</a></li>
-      <li><a href="{{ url_for('download_file', filename=outputs.summary) }}">{{ outputs.summary }}</a></li>
-      <li><a href="{{ url_for('download_file', filename=outputs.merged_report) }}">{{ outputs.merged_report }}</a></li>
-    </ul>
-    <p><a href="/">Do another comparison</a></p>
+    <h1>Comparison Result (Advanced)</h1>
+
+    <div class="controls">
+      {% if summary_file %}
+        <a href="{{ url_for('output_file', filename=summary_file) }}">Download summary</a>
+      {% endif %}
+      {% if annotated_new %}
+        <a href="{{ url_for('output_file', filename=annotated_new) }}">Download annotated new PDF</a>
+      {% endif %}
+      {% if merged_report %}
+        <a href="{{ url_for('output_file', filename=merged_report) }}">Download merged report</a>
+      {% endif %}
+      <a href="{{ url_for('index') }}">Back</a>
+    </div>
+
+    <hr/>
+    <div id="side-by-side">
+      {{ side_by_side|safe }}
+    </div>
+
+    <hr/>
+    <p>Changed pages: {{ changed_pages }}</p>
   </div>
 </body>
 </html>
+
 
