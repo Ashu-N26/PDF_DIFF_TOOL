@@ -2,10 +2,13 @@ services:
   - type: web
     name: pdf-diff-tool
     env: python
-    runtime: python-3.11
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: gunicorn app:app
     plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
 
 
 
