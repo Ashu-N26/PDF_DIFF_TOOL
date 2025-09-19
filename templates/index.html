@@ -1,61 +1,29 @@
-<!-- templates/index.html -->
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <title>PDF DIFF TOOL</title>
-  <link rel="stylesheet" href="/static/style.css"/>
+  <meta charset="utf-8">
+  <title>PDF DIFF TOOL (Advanced)</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="container">
-    <h1>PDF DIFF TOOL (Render)</h1>
-    <p>Created by Ashutosh Nanaware</p>
+    <h1>PDF_DIFF_TOOL (Advanced)</h1>
+    <p>Upload old and new PDFs. This advanced version uses PyMuPDF + Tesseract OCR and creates annotated PDF + side-by-side diff.</p>
 
-    <form id="uploadForm" method="post" enctype="multipart/form-data" action="/compare">
-      <div>
-        <label>Old PDF</label><br/>
-        <input type="file" name="old_pdf" accept="application/pdf" required />
-      </div>
-      <div>
-        <label>New PDF</label><br/>
-        <input type="file" name="new_pdf" accept="application/pdf" required />
-      </div>
-
-      <div class="options">
-        <label><input type="checkbox" name="ocr" /> Run OCR if no extractable text (requires tesseract)</label><br/>
-        <label><input type="checkbox" name="annotate_pages" /> Enable page-level annotations (heavy)</label>
-      </div>
-
-      <button type="submit">Compare PDFs</button>
+    <form action="/compare" method="post" enctype="multipart/form-data">
+      <label>Old PDF:</label><br/>
+      <input type="file" name="old_pdf" accept="application/pdf" required><br/><br/>
+      <label>New PDF:</label><br/>
+      <input type="file" name="new_pdf" accept="application/pdf" required><br/><br/>
+      <button type="submit">Compare (Advanced)</button>
     </form>
 
-    <div id="result"></div>
-    <div class="note">
-      <strong>Notes:</strong>
-      <ul>
-        <li>Deploy this repo to Render using Docker (Dockerfile included). It installs tesseract & poppler for OCR and image conversions.</li>
-        <li>By default page annotation is <em>off</em> (safe). Turn it on only on a powerful instance.</li>
-      </ul>
-    </div>
+    <hr/>
+    <p>Notes: OCR is done with Tesseract. Building the Docker image installs the required system dependencies.</p>
   </div>
-
-  <script>
-  const form = document.getElementById('uploadForm');
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(form);
-    document.getElementById('result').textContent = 'Working... this may take a while for large PDFs.';
-    const resp = await fetch('/compare', { method: 'POST', body: fd});
-    const json = await resp.json();
-    if (json.error) {
-      document.getElementById('result').innerHTML = '<pre style="color:red">' + JSON.stringify(json, null, 2) + '</pre>';
-      return;
-    }
-    document.getElementById('result').innerHTML = '<pre>' + JSON.stringify(json, null, 2) + '</pre>';
-  });
-  </script>
 </body>
 </html>
+
 
 
 
