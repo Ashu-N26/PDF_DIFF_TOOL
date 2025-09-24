@@ -1,5 +1,11 @@
 import streamlit as st
-from pdf_diff import generate_annotated_pdf, generate_side_by_side_pdf
+
+try:
+    from pdf_diff import generate_annotated_pdf, generate_side_by_side_pdf
+except Exception as e:
+    st.error("Failed to import pdf_diff module. Check required packages in requirements.txt.")
+    st.exception(e)
+    st.stop()
 
 # Streamlit App Title
 st.set_page_config(page_title="PDF Difference Highlighter", layout="wide")
