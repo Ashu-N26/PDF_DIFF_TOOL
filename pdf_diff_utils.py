@@ -1,24 +1,21 @@
 # pdf_diff_utils.py
 """
-Utilities to:
-- extract text lines + bounding boxes from PDF pages (using PyMuPDF)
-- diff lines page-by-page
-- annotate PDFs (rect annotations)
-- create side-by-side PDF (render pages to images and place left/right)
-- build a summary table (PDF) using reportlab
+Updated utilities for PDF diffing with the following rules:
+- Red highlight: changed data (highlighted on NEW PDF only)
+- Green highlight: inserted data (highlighted on NEW PDF)
+- Removed data: NOT highlighted; instead listed in summary panel appended to final PDF
+- No extra highlighting anywhere
 """
 
 import fitz  # PyMuPDF
 import re
 from difflib import SequenceMatcher
-import math
 import io
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from PIL import Image
-import numpy as np
 import os
 
 # Helper: convert 0-255 RGB to 0-1 float tuple
@@ -44,8 +41,7 @@ def extract_lines_with_bboxes(pdf_path):
     pages_lines = []
     for pageno in range(doc.page_count):
         page = doc.load_page(pageno)
-        words = page.get_text("words")  # list of tuples (x0,y0,x1,y1, "word", block_no, line_no, word_no)
-        # Group words by (block_no, line_no)
+        words = page.get_text("words")  # (x0,y0,x1,y1, "word", block_no, line_no, word_no)
         words.sort(key=lambda w: (w[5], w[6], w[0]))
         lines = []
         current_key = None
@@ -53,7 +49,6 @@ def extract_lines_with_bboxes(pdf_path):
         for w in words:
             key = (w[5], w[6])
             if key != current_key:
-                # flush
                 if current_words:
                     xs = [t[0] for t in current_words]
                     ys = [t[1] for t in current_words]
@@ -66,7 +61,6 @@ def extract_lines_with_bboxes(pdf_path):
                 current_key = key
             else:
                 current_words.append(w)
-        # final flush
         if current_words:
             xs = [t[0] for t in current_words]
             ys = [t[1] for t in current_words]
@@ -84,7 +78,6 @@ def numeric_tokens_from_text(s):
 
 def try_parse_number(tok):
     try:
-        # remove commas
         t = tok.replace(",", "")
         if "." in t:
             return float(t)
@@ -126,7 +119,6 @@ def compare_pages_lines(old_lines, new_lines, numeric_detection=True):
                     "numeric_info": None
                 })
         elif tag == "replace":
-            # Pair as many as possible
             len_old = i2 - i1
             len_new = j2 - j1
             pairs = max(len_old, len_new)
@@ -142,7 +134,6 @@ def compare_pages_lines(old_lines, new_lines, numeric_detection=True):
                     olds = numeric_tokens_from_text(old_text)
                     news = numeric_tokens_from_text(new_text)
                     if olds and news:
-                        # compare first numeric token heuristically
                         old_val = try_parse_number(olds[0])
                         new_val = try_parse_number(news[0])
                         if (old_val is not None) and (new_val is not None):
@@ -180,20 +171,21 @@ def compare_pages_lines(old_lines, new_lines, numeric_detection=True):
 
 def compare_pdfs_and_annotate(old_pdf_path, new_pdf_path, out_dir, enable_ocr=False, opacity=0.28, numeric_detection=True):
     """
-    Main orchestrator:
-      - Extract line bboxes for both PDFs
-      - Compare page-by-page
-      - Annotate old PDF for deletions/reductions (red)
-      - Annotate new PDF for insertions/increases (green)
-      - Save annotated PDFs to out_dir and return their paths and a diff summary list
+    New behavior to match user rules:
+      - Changed data (replace) -> highlight NEW PDF only, with RED
+      - Inserted data -> highlight NEW PDF only, with GREEN
+      - Deleted data -> do NOT highlight OLD PDF; instead record in summary for later inclusion
+      - No highlights on OLD PDF (no extra highlighting)
+    Returns (annotated_old_path, annotated_new_path, summary_rows)
+    Note: annotated_old_path will be a copy of old_pdf without highlights (kept for convenience),
+          annotated_new_path contains the red/green highlights per rule.
     """
-    # extract line-level info
     old_pages = extract_lines_with_bboxes(old_pdf_path)
     new_pages = extract_lines_with_bboxes(new_pdf_path)
 
     max_pages = max(len(old_pages), len(new_pages))
-    diffs_all = []  # summary list to build summary table
-    # We'll create editable copies of each doc to annotate
+    summary_items = []  # collects entries for summary panel (including removed items)
+    # Make copies for saving; OLD will remain un-highlighted per rule (but we save a copy)
     old_doc = fitz.open(old_pdf_path)
     new_doc = fitz.open(new_pdf_path)
 
@@ -201,10 +193,9 @@ def compare_pdfs_and_annotate(old_pdf_path, new_pdf_path, out_dir, enable_ocr=Fa
         old_lines = old_pages[p] if p < len(old_pages) else []
         new_lines = new_pages[p] if p < len(new_pages) else []
         page_diffs = compare_pages_lines(old_lines, new_lines, numeric_detection=numeric_detection)
-        # process diffs: add annotations
+
         for d in page_diffs:
-            entry = {"page": p + 1, "type": d["type"], "old_text": d["old_text"], "new_text": d["new_text"]}
-            # if it's an insertion, highlight new_doc page
+            # For insert -> highlight NEW (green)
             if d["type"] == "insert":
                 if d["new_bbox"] and p < new_doc.page_count:
                     page = new_doc.load_page(p)
@@ -213,93 +204,98 @@ def compare_pdfs_and_annotate(old_pdf_path, new_pdf_path, out_dir, enable_ocr=Fa
                     annot.set_colors(stroke=COLORS["green"], fill=COLORS["green"])
                     annot.set_opacity(opacity)
                     annot.update()
-                entry["color"] = "green"
-                diffs_all.append(entry)
+                # add to summary as an inserted row (so summary shows inserted items too)
+                summary_items.append({
+                    "page": p + 1,
+                    "change_type": "insert",
+                    "old_snippet": "",
+                    "new_snippet": d["new_text"][:200],
+                    "old_val": "",
+                    "new_val": ""
+                })
+
+            # For delete -> DO NOT highlight anywhere. Add an entry to summary indicating removal.
             elif d["type"] == "delete":
-                if d["old_bbox"] and p < old_doc.page_count:
-                    page = old_doc.load_page(p)
-                    rect = fitz.Rect(d["old_bbox"])
-                    annot = page.add_rect_annot(rect)
-                    annot.set_colors(stroke=COLORS["red"], fill=COLORS["red"])
-                    annot.set_opacity(opacity)
-                    annot.update()
-                entry["color"] = "red"
-                diffs_all.append(entry)
+                summary_items.append({
+                    "page": p + 1,
+                    "change_type": "delete",
+                    "old_snippet": d["old_text"][:200],
+                    "new_snippet": "",
+                    "old_val": "",
+                    "new_val": ""
+                })
+                # No annotation performed
+
+            # For replace -> treat as CHANGED. Highlight NEW PDF with RED only.
             elif d["type"] == "replace":
-                # if numeric_info present, annotate old/new appropriately
-                if d["numeric_info"] is not None:
-                    trend = d["numeric_info"]["trend"]
-                    entry["old_val"] = d["numeric_info"]["old_val"]
-                    entry["new_val"] = d["numeric_info"]["new_val"]
-                    entry["trend"] = trend
-                    if p < old_doc.page_count and d["old_bbox"]:
-                        page = old_doc.load_page(p)
-                        rect = fitz.Rect(d["old_bbox"])
+                # record numeric info if exists
+                if d.get("numeric_info") is not None:
+                    ni = d["numeric_info"]
+                    # We still highlight NEW text in red (changed)
+                    if d["new_bbox"] and p < new_doc.page_count:
+                        page = new_doc.load_page(p)
+                        rect = fitz.Rect(d["new_bbox"])
                         annot = page.add_rect_annot(rect)
                         annot.set_colors(stroke=COLORS["red"], fill=COLORS["red"])
                         annot.set_opacity(opacity)
                         annot.update()
-                    if p < new_doc.page_count and d["new_bbox"]:
-                        page = new_doc.load_page(p)
-                        rect = fitz.Rect(d["new_bbox"])
-                        annot = page.add_rect_annot(rect)
-                        annot.set_colors(stroke=COLORS["green"], fill=COLORS["green"])
-                        annot.set_opacity(opacity)
-                        annot.update()
-                    entry["color"] = "green" if trend == "increased" else "red" if trend == "decreased" else "black"
-                    diffs_all.append(entry)
+                    summary_items.append({
+                        "page": p + 1,
+                        "change_type": "replace",
+                        "old_snippet": d["old_text"][:200],
+                        "new_snippet": d["new_text"][:200],
+                        "old_val": ni.get("old_val"),
+                        "new_val": ni.get("new_val"),
+                        "trend": ni.get("trend")
+                    })
                 else:
-                    # generic replace: mark old red and new green
-                    if p < old_doc.page_count and d["old_bbox"]:
-                        page = old_doc.load_page(p)
-                        rect = fitz.Rect(d["old_bbox"])
+                    # generic text change: highlight NEW element red only
+                    if d["new_bbox"] and p < new_doc.page_count:
+                        page = new_doc.load_page(p)
+                        rect = fitz.Rect(d["new_bbox"])
                         annot = page.add_rect_annot(rect)
                         annot.set_colors(stroke=COLORS["red"], fill=COLORS["red"])
                         annot.set_opacity(opacity)
                         annot.update()
-                    if p < new_doc.page_count and d["new_bbox"]:
-                        page = new_doc.load_page(p)
-                        rect = fitz.Rect(d["new_bbox"])
-                        annot = page.add_rect_annot(rect)
-                        annot.set_colors(stroke=COLORS["green"], fill=COLORS["green"])
-                        annot.set_opacity(opacity)
-                        annot.update()
-                    entry["color"] = "green"
-                    diffs_all.append(entry)
-            elif d["type"] == "equal":
-                # no highlight required, but could record equal entries if desired
+                    summary_items.append({
+                        "page": p + 1,
+                        "change_type": "replace",
+                        "old_snippet": d["old_text"][:200],
+                        "new_snippet": d["new_text"][:200],
+                        "old_val": "",
+                        "new_val": ""
+                    })
+
+            # equal -> do nothing
+            else:
                 pass
 
-    # Save annotated PDFs
-    annotated_old = os.path.join(out_dir, "annotated_old.pdf")
-    annotated_new = os.path.join(out_dir, "annotated_new.pdf")
+    # Save annotated outputs
+    # Per rule: old PDF should have no highlights — we save original as annotated_old (copy)
+    annotated_old = os.path.join(out_dir, "annotated_old_no_highlights.pdf")
+    annotated_new = os.path.join(out_dir, "annotated_new_highlights.pdf")
+    # Save copies
     old_doc.save(annotated_old, garbage=4, deflate=True)
     new_doc.save(annotated_new, garbage=4, deflate=True)
     old_doc.close()
     new_doc.close()
 
-    # Build a condensed diff summary list of dicts (for summary page)
+    # Build summary rows suitable for the summary panel
     summary_rows = []
-    for d in diffs_all:
-        snippet_old = (d.get("old_text") or "")[:120]
-        snippet_new = (d.get("new_text") or "")[:120]
+    for r in summary_items:
         summary_rows.append({
-            "page": d.get("page"),
-            "change_type": d.get("type"),
-            "color": d.get("color", ""),
-            "old_snippet": snippet_old,
-            "new_snippet": snippet_new,
-            "old_val": d.get("old_val", ""),
-            "new_val": d.get("new_val", ""),
-            "trend": d.get("trend", "")
+            "page": r.get("page"),
+            "change_type": r.get("change_type"),
+            "old_snippet": r.get("old_snippet", ""),
+            "new_snippet": r.get("new_snippet", ""),
+            "old_val": r.get("old_val", ""),
+            "new_val": r.get("new_val", ""),
+            "trend": r.get("trend", "")
         })
 
     return annotated_old, annotated_new, summary_rows
 
 def append_pdf(base_pdf, to_append_pdf, out_path):
-    """
-    Append PDF `to_append_pdf` to end of `base_pdf` and write to out_path
-    """
     base = fitz.open(base_pdf)
     app = fitz.open(to_append_pdf)
     base.insert_pdf(app)
@@ -309,118 +305,106 @@ def append_pdf(base_pdf, to_append_pdf, out_path):
 
 def merge_summary_into_pdf(diff_summary, summary_pdf_path, created_by=""):
     """
-    Build a single-page (or multi-page if needed) PDF containing a summary table of diffs.
-    Uses reportlab to create a PDF saved at summary_pdf_path.
+    Build a PDF summary panel that includes:
+     - Removed items (change_type == 'delete') clearly labelled
+     - Inserted items and replaced items with snippets and numeric old/new values if present
     """
-    # Create table data
-    headers = ["Page", "Change", "Old (snippet)", "New (snippet)", "Old val", "New val"]
+    headers = ["Page", "Change Type", "Old (snippet)", "New (snippet)", "Old val", "New val", "Trend"]
     rows = [headers]
     for r in diff_summary:
         rows.append([
             r.get("page"),
-            r.get("trend") or r.get("change_type"),
-            (r.get("old_snippet") or "")[:100],
-            (r.get("new_snippet") or "")[:100],
+            r.get("change_type"),
+            (r.get("old_snippet") or "")[:120],
+            (r.get("new_snippet") or "")[:120],
             str(r.get("old_val") or ""),
-            str(r.get("new_val") or "")
+            str(r.get("new_val") or ""),
+            str(r.get("trend") or "")
         ])
 
-    # Use A4 portrait pages; table may overflow to multiple pages
     doc = SimpleDocTemplate(summary_pdf_path, pagesize=A4, rightMargin=18, leftMargin=18, topMargin=18, bottomMargin=18)
     elements = []
     style = getSampleStyleSheet()["BodyText"]
     title_style = getSampleStyleSheet()["Heading1"]
     elements.append(Paragraph("PDF Comparison Summary", title_style))
-    elements.append(Spacer(1, 8))
+    elements.append(Spacer(1, 6))
     if created_by:
         elements.append(Paragraph(f"Created by: {created_by}", style))
-        elements.append(Spacer(1, 10))
+        elements.append(Spacer(1, 8))
 
-    # Build table with style
-    table = Table(rows, repeatRows=1, colWidths=[40, 80, 200, 200, 60, 60])
-    tblstyle = TableStyle(
-        [
-            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ]
-    )
+    table = Table(rows, repeatRows=1, colWidths=[40, 70, 160, 160, 60, 60, 50])
+    tblstyle = TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dddddd")),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+    ])
     table.setStyle(tblstyle)
     elements.append(table)
     doc.build(elements)
 
 def create_side_by_side_pdf(old_pdf_path, new_pdf_path, out_path):
     """
-    Creates a PDF where each page is a side-by-side rendering:
-      left: old pdf page image
-      right: new pdf page image (already annotated)
-    No summary panel included in these pages.
+    Creates side-by-side pages:
+      left: old PDF page image (no highlights)
+      right: new PDF page image (with highlights)
+    No summary panel on this file per requirement.
     """
     old_doc = fitz.open(old_pdf_path)
     new_doc = fitz.open(new_pdf_path)
-    # output doc
     out_doc = fitz.open()
 
     max_pages = max(old_doc.page_count, new_doc.page_count)
     for i in range(max_pages):
-        # render pages to pixmap
+        # render pages
+        old_img = None
+        new_img = None
         if i < old_doc.page_count:
             old_page = old_doc.load_page(i)
-            old_pix = old_page.get_pixmap(matrix=fitz.Matrix(2, 2))  # increase resolution
+            old_pix = old_page.get_pixmap(matrix=fitz.Matrix(2, 2))
             old_img = old_pix.tobytes("png")
-            ow, oh = old_pix.width, old_pix.height
-        else:
-            old_img = None
-            ow = oh = 1
-
+            old_pil = Image.open(io.BytesIO(old_img))
         if i < new_doc.page_count:
             new_page = new_doc.load_page(i)
             new_pix = new_page.get_pixmap(matrix=fitz.Matrix(2, 2))
             new_img = new_pix.tobytes("png")
-            nw, nh = new_pix.width, new_pix.height
-        else:
-            new_img = None
-            nw = nh = 1
+            new_pil = Image.open(io.BytesIO(new_img))
 
-        # Normalize heights by using max height and scale widths accordingly
+        # handle missing pages gracefully
+        ow, oh = (old_pil.width, old_pil.height) if old_img else (1, 1)
+        nw, nh = (new_pil.width, new_pil.height) if new_img else (1, 1)
         target_h = max(oh, nh)
-        # scale images to same height and create combined width
+        # scale widths
         if old_img:
-            old_img_pil = Image.open(io.BytesIO(old_img))
-            scale_old = target_h / old_img_pil.height
-            new_ow = int(old_img_pil.width * scale_old)
+            scale_old = target_h / old_pil.height
+            new_ow = int(old_pil.width * scale_old)
+            old_resized = old_pil.resize((new_ow, target_h), Image.LANCZOS)
         else:
-            new_ow = 1
+            new_ow = int(0.5 * (target_h))  # placeholder
+            old_resized = Image.new("RGB", (new_ow, target_h), (255, 255, 255))
         if new_img:
-            new_img_pil = Image.open(io.BytesIO(new_img))
-            scale_new = target_h / new_img_pil.height
-            new_nw = int(new_img_pil.width * scale_new)
+            scale_new = target_h / new_pil.height
+            new_nw = int(new_pil.width * scale_new)
+            new_resized = new_pil.resize((new_nw, target_h), Image.LANCZOS)
         else:
-            new_nw = 1
+            new_nw = int(0.5 * (target_h))
+            new_resized = Image.new("RGB", (new_nw, target_h), (255, 255, 255))
 
         page_w = new_ow + new_nw
         page_h = target_h
-
-        # create an empty page with width page_w and height page_h
         page = out_doc.new_page(width=page_w, height=page_h)
 
-        # insert old image at left
-        x = 0
-        if old_img:
-            old_img_pil = old_img_pil.resize((new_ow, page_h), Image.LANCZOS)
-            buffer = io.BytesIO()
-            old_img_pil.save(buffer, format="PNG")
-            page.insert_image(fitz.Rect(x, 0, x + new_ow, page_h), stream=buffer.getvalue())
-        x += new_ow
-        # insert new image at right
-        if new_img:
-            new_img_pil = new_img_pil.resize((new_nw, page_h), Image.LANCZOS)
-            buffer = io.BytesIO()
-            new_img_pil.save(buffer, format="PNG")
-            page.insert_image(fitz.Rect(x, 0, x + new_nw, page_h), stream=buffer.getvalue())
+        # left image
+        buffer = io.BytesIO()
+        old_resized.save(buffer, format="PNG")
+        page.insert_image(fitz.Rect(0, 0, new_ow, page_h), stream=buffer.getvalue())
+        # right image
+        buffer = io.BytesIO()
+        new_resized.save(buffer, format="PNG")
+        page.insert_image(fitz.Rect(new_ow, 0, new_ow + new_nw, page_h), stream=buffer.getvalue())
 
     out_doc.save(out_path, garbage=4, deflate=True)
     out_doc.close()
     old_doc.close()
     new_doc.close()
+
