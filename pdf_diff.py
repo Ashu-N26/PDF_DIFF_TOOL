@@ -1,39 +1,92 @@
 # pdf_diff.py
 """
-pdf_diff.py
-Robust PDF diff utilities for:
-  - generate_annotated_pdf(old_pdf_path, new_pdf_path, output_path, ...)
-  - generate_side_by_side_pdf(old_pdf_path, new_pdf_path, output_path)
+Robust PDF diff utilities with lazy imports and clear error messages.
 
-Behavior:
-  - Inserted tokens -> GREEN highlight on NEW PDF (opacity default 0.5)
-  - Changed tokens  -> RED highlight on NEW PDF (opacity default 0.5)
-  - Removed tokens  -> NOT highlighted; listed in the summary panel appended to final PDF
-  - If a page has no selectable text, record that fact in the summary (ask user to OCR)
+Provides:
+  - generate_annotated_pdf(old_input, new_input, output_path, created_by="...", highlight_opacity=0.5)
+  - generate_side_by_side_pdf(old_input, new_input, output_path, zoom=1.8)
+
+old_input/new_input may be:
+  - a filesystem path (str) OR
+  - a file-like object with .read() (Streamlit's UploadedFile)
+
+This module avoids importing PyMuPDF (fitz) at module import time to prevent Streamlit start-up crashes
+when PyMuPDF isn't installed or incompatible with the Python runtime. Instead it imports inside functions
+and raises a clear RuntimeError if the dependency is missing.
 """
-
-from typing import List, Tuple, Dict, Any
-import fitz  # PyMuPDF
-from difflib import SequenceMatcher
-import re
+from typing import Any, Dict, List, Tuple
+import tempfile
 import os
 import io
-import tempfile
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
-from PIL import Image
+import re
+from difflib import SequenceMatcher
 
-# Colors (float 0..1 tuples)
-GREEN = (60/255.0, 170/255.0, 60/255.0)
-RED = (255/255.0, 80/255.0, 80/255.0)
-
-# number regex for numeric detection in summary
+# light-weight standard helpers only (no heavy third-party imports here)
 number_regex = re.compile(r"[-+]?\d[\d,]*\.?\d*")
 
+def _save_input_to_temp(input_obj: Any, target_dir: str, name: str) -> str:
+    """
+    Accept either a path string or a file-like object. Return a file path.
+    """
+    if isinstance(input_obj, str):
+        # already a path on disk
+        if not os.path.exists(input_obj):
+            raise FileNotFoundError(f"File path not found: {input_obj}")
+        return input_obj
+    # expect file-like with .read()
+    if hasattr(input_obj, "read"):
+        out_path = os.path.join(target_dir, name)
+        with open(out_path, "wb") as f:
+            # if stream provides bytes directly
+            data = input_obj.read()
+            # some UploadedFile return bytes; if it's a buffer object, keep as bytes
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            f.write(data)
+        # reset stream pointer if it supports seek
+        try:
+            input_obj.seek(0)
+        except Exception:
+            pass
+        return out_path
+    raise ValueError("Unsupported input type for PDF: provide file path or file-like object")
+
+def _ensure_pdf_deps():
+    """
+    Lazy import of heavy libs. If import fails, raise a helpful RuntimeError with installation guidance.
+    """
+    try:
+        import fitz  # PyMuPDF
+        from PIL import Image
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet
+    except Exception as e:
+        hint = (
+            "Missing or incompatible dependency for PDF rendering/annotation (PyMuPDF/Pillow/reportlab).\n"
+            "On Streamlit Cloud, make sure your requirements.txt includes a supported PyMuPDF wheel.\n"
+            "Recommended: add 'PyMuPDF==1.23.6' (or a stable 1.23.x/1.24.x release) and compatible Pillow/reportlab versions.\n"
+            "If your environment uses Python 3.13, PyMuPDF may not yet have wheels for that Python version — try Python 3.11 or 3.10.\n"
+            "After updating requirements.txt, commit & push to GitHub to trigger Streamlit rebuild."
+        )
+        raise RuntimeError(f"{hint}\nOriginal error: {e}") from e
+
+    # return modules (so callers can use them)
+    return {
+        "fitz": fitz,
+        "Image": Image,
+        "A4": A4,
+        "SimpleDocTemplate": SimpleDocTemplate,
+        "Table": Table,
+        "TableStyle": TableStyle,
+        "Paragraph": Paragraph,
+        "Spacer": Spacer,
+        "colors": colors,
+        "getSampleStyleSheet": getSampleStyleSheet,
+    }
+
 def try_parse_first_number(s: str):
-    """Return first numeric token as int/float if present, else None."""
     if not s:
         return None
     m = number_regex.search(s)
@@ -48,103 +101,76 @@ def try_parse_first_number(s: str):
     except Exception:
         return None
 
-def extract_page_tokens(pdf_path: str) -> List[List[Dict[str, Any]]]:
+def generate_annotated_pdf(old_input: Any, new_input: Any, output_path: str,
+                           created_by: str = "Ashutosh Nanaware",
+                           highlight_opacity: float = 0.5) -> Tuple[str, List[Dict[str, Any]]]:
     """
-    Extract per-page words (tokens) and their bounding boxes.
+    Full pipeline:
+      - Accept old_input/new_input (path or file-like)
+      - Run token-level diff using PyMuPDF word coordinates
+      - Annotate NEW PDF: inserted tokens (green), replaced tokens (red); removed tokens recorded in summary only
+      - Append summary page to annotated new PDF and write to output_path
+    Returns (output_path, summary_rows)
+    """
+    # lazy import and helpful error if missing
+    deps = _ensure_pdf_deps()
+    fitz = deps["fitz"]
+    Image = deps["Image"]
+    SimpleDocTemplate = deps["SimpleDocTemplate"]
+    Table = deps["Table"]
+    TableStyle = deps["TableStyle"]
+    Paragraph = deps["Paragraph"]
+    Spacer = deps["Spacer"]
+    colors = deps["colors"]
+    getSampleStyleSheet = deps["getSampleStyleSheet"]
 
-    Returns:
-      pages_tokens: list indexed by page, each is a list of dicts:
-         { "text": str, "bbox": (x0, y0, x1, y1) }
-    """
-    doc = fitz.open(pdf_path)
-    pages_tokens = []
-    try:
-        for p in range(doc.page_count):
-            page = doc.load_page(p)
-            words = page.get_text("words")  # tuples: x0,y0,x1,y1,word,block,line,wordno
-            # If no words found, append empty list
-            if not words:
-                pages_tokens.append([])
-                continue
-            # sort by (block, line, x0) to preserve reading order
-            words.sort(key=lambda w: (w[5], w[6], w[0], w[1]))
-            tokens = []
-            for w in words:
-                x0, y0, x1, y1, word = w[0], w[1], w[2], w[3], w[4]
-                txt = str(word).strip()
-                if txt == "":
+    tmpdir = tempfile.mkdtemp(prefix="pdfdiff_")
+    old_path = _save_input_to_temp(old_input, tmpdir, "old.pdf")
+    new_path = _save_input_to_temp(new_input, tmpdir, "new.pdf")
+
+    # token extraction using PyMuPDF (per-page 'words')
+    def extract_page_tokens(pdf_path: str):
+        doc = fitz.open(pdf_path)
+        pages = []
+        try:
+            for p in range(doc.page_count):
+                page = doc.load_page(p)
+                words = page.get_text("words")  # list of tuples
+                if not words:
+                    pages.append([])
                     continue
-                tokens.append({"text": txt, "bbox": (x0, y0, x1, y1)})
-            pages_tokens.append(tokens)
-    finally:
-        doc.close()
-    return pages_tokens
+                words.sort(key=lambda w: (w[5], w[6], w[1], w[0]))
+                toks = [{"text": str(w[4]).strip(), "bbox": (w[0], w[1], w[2], w[3])} for w in words if str(w[4]).strip() != ""]
+                pages.append(toks)
+        finally:
+            doc.close()
+        return pages
 
-def _expand_bbox(bbox: Tuple[float, float, float, float], expand: float = 1.5):
-    """Expand bbox by `expand` points in all directions (keeps floats)."""
-    x0, y0, x1, y1 = bbox
-    return (x0 - expand, y0 - expand, x1 + expand, y1 + expand)
+    old_tokens_pages = extract_page_tokens(old_path)
+    new_tokens_pages = extract_page_tokens(new_path)
+    max_pages = max(len(old_tokens_pages), len(new_tokens_pages))
 
-def _group_opcode_summary(tag: str, old_texts: List[str], new_texts: List[str], i1: int, i2: int, j1: int, j2: int) -> Dict[str, str]:
-    """
-    Build a concise summary dict for the given opcode ranges.
-    Fields: change_type, old_snippet, new_snippet, old_val, new_val
-    """
-    old_snip = " ".join(old_texts[i1:i2]) if i1 is not None and i2 is not None else ""
-    new_snip = " ".join(new_texts[j1:j2]) if j1 is not None and j2 is not None else ""
-    old_val = try_parse_first_number(old_snip) if old_snip else ""
-    new_val = try_parse_first_number(new_snip) if new_snip else ""
-    change_type = ""
-    if tag == "insert":
-        change_type = "insert"
-    elif tag == "delete":
-        change_type = "delete"
-    elif tag == "replace":
-        change_type = "replace"
-    else:
-        change_type = "unknown"
-    return {
-        "change_type": change_type,
-        "old_snippet": old_snip,
-        "new_snippet": new_snip,
-        "old_val": old_val if old_val is not None else "",
-        "new_val": new_val if new_val is not None else ""
-    }
-
-def token_level_diff_and_annotate(old_pdf_path: str, new_pdf_path: str, out_dir: str, highlight_opacity: float = 0.5) -> Tuple[str, List[Dict[str, Any]]]:
-    """
-    Token-level diff and annotate NEW PDF.
-    - Highlights NEW tokens for 'insert' (green) and 'replace' (red).
-    - Records 'delete' items (removed) in the summary list.
-    Returns:
-      annotated_new_path, summary_rows
-    """
-    # Prepare token lists
-    old_pages_tokens = extract_page_tokens(old_pdf_path)
-    new_pages_tokens = extract_page_tokens(new_pdf_path)
-    max_pages = max(len(old_pages_tokens), len(new_pages_tokens))
-
-    # Open docs
-    old_doc = fitz.open(old_pdf_path)
-    new_doc = fitz.open(new_pdf_path)
+    # open docs for annotation
+    old_doc = fitz.open(old_path)
+    new_doc = fitz.open(new_path)
 
     summary_rows: List[Dict[str, Any]] = []
 
     try:
         for p in range(max_pages):
-            old_tokens = old_pages_tokens[p] if p < len(old_pages_tokens) else []
-            new_tokens = new_pages_tokens[p] if p < len(new_pages_tokens) else []
+            old_tokens = old_tokens_pages[p] if p < len(old_tokens_pages) else []
+            new_tokens = new_tokens_pages[p] if p < len(new_tokens_pages) else []
 
-            # If both have no tokens: note in summary and skip page diff
             if not old_tokens and not new_tokens:
+                # no selectable text on this page
                 summary_rows.append({
-                    "page": p + 1,
+                    "page": p+1,
                     "change_type": "no_text",
                     "old_snippet": "",
                     "new_snippet": "",
                     "old_val": "",
                     "new_val": "",
-                    "note": "No selectable text on page — consider OCR if this page contains text"
+                    "note": "No selectable text on this page — consider OCR"
                 })
                 continue
 
@@ -152,56 +178,66 @@ def token_level_diff_and_annotate(old_pdf_path: str, new_pdf_path: str, out_dir:
             new_texts = [t["text"] for t in new_tokens]
 
             sm = SequenceMatcher(None, old_texts, new_texts, autojunk=False)
+
             for tag, i1, i2, j1, j2 in sm.get_opcodes():
                 if tag == "equal":
                     continue
-
                 if tag == "insert":
-                    # Annotate new tokens j1..j2-1 (green)
-                    if new_doc.page_count > p:
+                    # annotate new tokens as GREEN
+                    if p < new_doc.page_count:
                         page = new_doc.load_page(p)
                         for nj in range(j1, j2):
                             tok = new_tokens[nj]
-                            bbox = _expand_bbox(tok["bbox"], expand=1.2)
-                            rect = fitz.Rect(bbox)
+                            x0, y0, x1, y1 = tok["bbox"]
+                            rect = fitz.Rect(x0-1.2, y0-1.2, x1+1.2, y1+1.2)
                             annot = page.add_rect_annot(rect)
                             annot.set_colors(stroke=GREEN, fill=GREEN)
                             annot.set_opacity(float(highlight_opacity))
                             annot.update()
-                    # Summary: group snippet
                     summary_rows.append({
-                        "page": p + 1,
-                        **_group_opcode_summary("insert", old_texts, new_texts, i1=None, i2=None, j1=j1, j2=j2)
+                        "page": p+1,
+                        "change_type": "insert",
+                        "old_snippet": "",
+                        "new_snippet": " ".join(new_texts[j1:j2]),
+                        "old_val": "",
+                        "new_val": ""
                     })
-
                 elif tag == "delete":
-                    # Do NOT annotate old; record in summary
+                    # record deletions in summary only
                     summary_rows.append({
-                        "page": p + 1,
-                        **_group_opcode_summary("delete", old_texts, new_texts, i1=i1, i2=i2, j1=None, j2=None)
+                        "page": p+1,
+                        "change_type": "delete",
+                        "old_snippet": " ".join(old_texts[i1:i2]),
+                        "new_snippet": "",
+                        "old_val": "",
+                        "new_val": ""
                     })
-
                 elif tag == "replace":
-                    # Annotate all new tokens j1..j2-1 in RED
-                    if new_doc.page_count > p:
+                    # annotate new tokens as RED
+                    if p < new_doc.page_count:
                         page = new_doc.load_page(p)
                         for nj in range(j1, j2):
                             tok = new_tokens[nj]
-                            bbox = _expand_bbox(tok["bbox"], expand=1.2)
-                            rect = fitz.Rect(bbox)
+                            x0, y0, x1, y1 = tok["bbox"]
+                            rect = fitz.Rect(x0-1.2, y0-1.2, x1+1.2, y1+1.2)
                             annot = page.add_rect_annot(rect)
                             annot.set_colors(stroke=RED, fill=RED)
                             annot.set_opacity(float(highlight_opacity))
                             annot.update()
-                    # Summary: show grouped old->new snippet and numbers if detected
+                    old_snip = " ".join(old_texts[i1:i2])
+                    new_snip = " ".join(new_texts[j1:j2])
                     summary_rows.append({
-                        "page": p + 1,
-                        **_group_opcode_summary("replace", old_texts, new_texts, i1=i1, i2=i2, j1=j1, j2=j2)
+                        "page": p+1,
+                        "change_type": "replace",
+                        "old_snippet": old_snip,
+                        "new_snippet": new_snip,
+                        "old_val": try_parse_first_number(old_snip) or "",
+                        "new_val": try_parse_first_number(new_snip) or ""
                     })
                 else:
-                    # safety
+                    # fallback
                     summary_rows.append({
-                        "page": p + 1,
+                        "page": p+1,
                         "change_type": tag,
                         "old_snippet": " ".join(old_texts[i1:i2]) if i1 is not None else "",
                         "new_snippet": " ".join(new_texts[j1:j2]) if j1 is not None else "",
@@ -209,154 +245,108 @@ def token_level_diff_and_annotate(old_pdf_path: str, new_pdf_path: str, out_dir:
                         "new_val": ""
                     })
 
-        # Save annotated NEW PDF to a temp file
-        annotated_new_path = os.path.join(out_dir, "annotated_new_highlights.pdf")
-        # Ensure the directory exists
-        os.makedirs(os.path.dirname(annotated_new_path), exist_ok=True)
-        new_doc.save(annotated_new_path, garbage=4, deflate=True)
+        # save annotated new PDF (temporary, then we will append summary)
+        annotated_new_tmp = os.path.join(tmpdir, "annotated_new_tmp.pdf")
+        new_doc.save(annotated_new_tmp, garbage=4, deflate=True)
+
+        # build summary PDF using reportlab
+        sample_styles = getSampleStyleSheet()
+        summary_tmp = os.path.join(tmpdir, "summary_panel.pdf")
+        # build rows grouped by change_type
+        headers = ["Page", "Type", "Old (snippet)", "New (snippet)", "Old val", "New val", "Note"]
+        table_rows = [headers]
+        for r in summary_rows:
+            page = r.get("page")
+            ctype = r.get("change_type", "")
+            note = r.get("note", "")
+            tdisp = "Other"
+            if ctype == "insert":
+                tdisp = "Inserted"
+            elif ctype == "replace":
+                tdisp = "Changed"
+            elif ctype == "delete":
+                tdisp = "Removed"
+            elif ctype == "no_text":
+                tdisp = "No selectable text"
+            table_rows.append([
+                page,
+                tdisp,
+                (r.get("old_snippet") or "")[:240],
+                (r.get("new_snippet") or "")[:240],
+                str(r.get("old_val") or ""),
+                str(r.get("new_val") or ""),
+                note
+            ])
+        # create summary PDF
+        doc = SimpleDocTemplate(summary_tmp, pagesize=A4, rightMargin=12, leftMargin=12, topMargin=12, bottomMargin=12)
+        elems = []
+        elems.append(Paragraph("PDF Comparison Summary", sample_styles["Heading1"]))
+        elems.append(Spacer(1, 6))
+        elems.append(Paragraph(f"Created by: {created_by}", sample_styles["Normal"]))
+        elems.append(Spacer(1, 8))
+        from reportlab.platypus import Table as RLTable  # local import to be explicit
+        t = RLTable(table_rows, repeatRows=1, colWidths=[40, 70, 180, 180, 60, 60, 80])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#DDDDDD")),
+            ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+        ]))
+        elems.append(t)
+        doc.build(elems)
+
+        # append the summary PDF pages to annotated_new_tmp
+        base = fitz.open(annotated_new_tmp)
+        summary_doc = fitz.open(summary_tmp)
+        base.insert_pdf(summary_doc)
+        # save final output
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        base.save(output_path, garbage=4, deflate=True)
+        base.close()
+        summary_doc.close()
+
     finally:
         old_doc.close()
         new_doc.close()
 
-    return annotated_new_path, summary_rows
-
-def build_summary_pdf(summary_rows: List[Dict[str, Any]], out_path: str, created_by: str = "Ashutosh Nanaware"):
-    """
-    Build a summary panel PDF from summary_rows and save to out_path.
-    summary_rows expected fields:
-      page, change_type, old_snippet, new_snippet, old_val, new_val, note (optional)
-    """
-    # Prepare rows grouped: Inserted, Changed, Removed, No-text
-    headers = ["Page", "Type", "Old (snippet)", "New (snippet)", "Old val", "New val", "Note"]
-    table_rows = [headers]
-
-    for r in summary_rows:
-        ctype = r.get("change_type", "")
-        page = r.get("page", "")
-        old_snip = (r.get("old_snippet") or "")[:240]
-        new_snip = (r.get("new_snippet") or "")[:240]
-        old_val = str(r.get("old_val", "") or "")
-        new_val = str(r.get("new_val", "") or "")
-        note = r.get("note", "")
-
-        # Display friendly type names
-        t_display = ""
-        if ctype == "insert":
-            t_display = "Inserted"
-        elif ctype == "replace":
-            t_display = "Changed"
-        elif ctype == "delete":
-            t_display = "Removed"
-        elif ctype == "no_text":
-            t_display = "No selectable text"
-        else:
-            t_display = ctype or "Other"
-
-        table_rows.append([page, t_display, old_snip, new_snip, old_val, new_val, note])
-
-    # Render PDF
-    doc = SimpleDocTemplate(out_path, pagesize=A4, rightMargin=12, leftMargin=12, topMargin=12, bottomMargin=12)
-    elements = []
-    styles = getSampleStyleSheet()
-    elements.append(Paragraph("PDF Comparison Summary", styles["Heading1"]))
-    elements.append(Spacer(1, 6))
-    elements.append(Paragraph(f"Created by: {created_by}", styles["Normal"]))
-    elements.append(Spacer(1, 8))
-
-    # Table
-    col_widths = [40, 70, 180, 180, 60, 60, 80]
-    t = Table(table_rows, repeatRows=1, colWidths=col_widths)
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#DDDDDD")),
-        ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("FONTSIZE", (0,0), (-1,-1), 8),
-        ("ALIGN", (0,0), (0,-1), "CENTER")
-    ]))
-    elements.append(t)
-    doc.build(elements)
-
-def append_pdf(base_pdf_path: str, to_append_pdf_path: str, out_path: str):
-    """
-    Append to_append_pdf pages to base_pdf and write as out_path (using PyMuPDF).
-    """
-    base = fitz.open(base_pdf_path)
-    app = fitz.open(to_append_pdf_path)
-    try:
-        base.insert_pdf(app)
-        base.save(out_path, garbage=4, deflate=True)
-    finally:
-        base.close()
-        app.close()
-
-def generate_annotated_pdf(old_pdf_path: str, new_pdf_path: str, output_path: str, created_by: str = "Ashutosh Nanaware", highlight_opacity: float = 0.5) -> Tuple[str, List[Dict[str, Any]]]:
-    """
-    Full pipeline to create annotated NEW PDF (with highlights) and append a summary panel.
-    Writes final file to `output_path`.
-
-    Returns (output_path, summary_rows).
-    """
-    # Create temp directory for intermediate files
-    tmpdir = tempfile.mkdtemp(prefix="pdfdiff_")
-    try:
-        # 1) token diff & annotate new PDF
-        annotated_new_temp, summary_rows = token_level_diff_and_annotate(old_pdf_path, new_pdf_path, tmpdir, highlight_opacity=highlight_opacity)
-
-        # 2) build summary PDF
-        summary_temp = os.path.join(tmpdir, "summary_panel.pdf")
-        build_summary_pdf(summary_rows, summary_temp, created_by=created_by)
-
-        # 3) append summary to annotated new PDF -> final output
-        append_pdf(annotated_new_temp, summary_temp, output_path)
-
-    except Exception as e:
-        # Clean up temp files on error and re-raise with context
-        raise RuntimeError(f"Failed to generate annotated PDF: {e}") from e
-    finally:
-        # try to remove tempdir but ignore errors
-        try:
-            # don't aggressively delete to allow debugging on remote; remove files individually if exists
-            pass
-        except Exception:
-            pass
-
     return output_path, summary_rows
 
-def generate_side_by_side_pdf(old_pdf_path: str, new_pdf_path: str, output_path: str, zoom: float = 1.8):
+def generate_side_by_side_pdf(old_input: Any, new_input: Any, output_path: str, zoom: float = 1.8) -> str:
     """
-    Create a side-by-side PDF (old on left, new on right).
-    Renders each page to image and places them on a wide page.
+    Create side-by-side PDF pages rendering old and new pages as images and placing them left/right.
+    Accepts file path or file-like for inputs. Writes to output_path.
+    """
+    deps = _ensure_pdf_deps()
+    fitz = deps["fitz"]
+    Image = deps["Image"]
 
-    Parameters:
-      zoom: render zoom factor (1.0 = 72dpi; >1 improves quality)
-    """
-    old_doc = fitz.open(old_pdf_path)
-    new_doc = fitz.open(new_pdf_path)
+    tmpdir = tempfile.mkdtemp(prefix="pdfdiff_")
+    old_path = _save_input_to_temp(old_input, tmpdir, "old.pdf")
+    new_path = _save_input_to_temp(new_input, tmpdir, "new.pdf")
+
+    old_doc = fitz.open(old_path)
+    new_doc = fitz.open(new_path)
     out_doc = fitz.open()
 
     try:
         max_pages = max(old_doc.page_count, new_doc.page_count)
         for i in range(max_pages):
-            # Render old page
+            # render old page
             if i < old_doc.page_count:
-                opage = old_doc.load_page(i)
-                mp = fitz.Matrix(zoom, zoom)
-                o_pix = opage.get_pixmap(matrix=mp, alpha=False)
+                op = old_doc.load_page(i)
+                o_pix = op.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
                 o_img = Image.open(io.BytesIO(o_pix.tobytes("png")))
             else:
-                # blank placeholder
                 o_img = Image.new("RGB", (800, 1000), (255, 255, 255))
 
-            # Render new page
+            # render new page
             if i < new_doc.page_count:
-                npage = new_doc.load_page(i)
-                mp = fitz.Matrix(zoom, zoom)
-                n_pix = npage.get_pixmap(matrix=mp, alpha=False)
+                npg = new_doc.load_page(i)
+                n_pix = npg.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
                 n_img = Image.open(io.BytesIO(n_pix.tobytes("png")))
             else:
                 n_img = Image.new("RGB", (800, 1000), (255, 255, 255))
 
-            # Normalize heights
             target_h = max(o_img.height, n_img.height)
             o_w = int(o_img.width * (target_h / o_img.height))
             n_w = int(n_img.width * (target_h / n_img.height))
@@ -367,12 +357,10 @@ def generate_side_by_side_pdf(old_pdf_path: str, new_pdf_path: str, output_path:
             page_h = target_h
             page = out_doc.new_page(width=page_w, height=page_h)
 
-            # insert left image
             buf = io.BytesIO()
             o_resized.save(buf, format="PNG")
             page.insert_image(fitz.Rect(0, 0, o_w, page_h), stream=buf.getvalue())
 
-            # insert right image
             buf = io.BytesIO()
             n_resized.save(buf, format="PNG")
             page.insert_image(fitz.Rect(o_w, 0, o_w + n_w, page_h), stream=buf.getvalue())
@@ -385,16 +373,6 @@ def generate_side_by_side_pdf(old_pdf_path: str, new_pdf_path: str, output_path:
 
     return output_path
 
-# Optional helper for quick local testing:
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) < 4:
-        print("Usage: python pdf_diff.py old.pdf new.pdf output_annotated.pdf")
-        sys.exit(1)
-    oldp, newp, outp = sys.argv[1:4]
-    print("Generating annotated PDF...")
-    generate_annotated_pdf(oldp, newp, outp)
-    print("Done. Output:", outp)
 
 
 
