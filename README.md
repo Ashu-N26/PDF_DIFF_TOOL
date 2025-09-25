@@ -1,18 +1,19 @@
-# PDF_DIFF_TOOL (Token-level highlighting)
-Created by Ashutosh Nanaware
+# PDF Diff Tool
 
-## What it does
-- Token-level inline highlights in new PDF:
-  - Inserted tokens → Green highlight (50% opacity)
-  - Changed tokens → Red highlight (50% opacity)
-  - Removed tokens → NOT highlighted; listed in appended Summary panel
-- Side-by-side PDF (Old | New)
-- Summary panel appended to annotated NEW PDF
+A web-based PDF comparison tool that:
+- Highlights inserted (green) and changed (red) text inline.
+- Appends a summary panel of removed data.
+- Generates **Annotated PDF** and **Side-by-Side PDF**.
+- Deployable on **Render** or **Streamlit Cloud**.
 
-## Run locally
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-streamlit run streamlit_app.py
+### Deployment (Render)
+1. Push repo to GitHub.
+2. Create a **Web Service** on Render.
+3. Connect repo, set build to **Python 3.11+**.
+4. Render installs `requirements.txt` and uses `Procfile` to run.
+
+---
+
+👨‍💻 Created by Ashutosh Nanaware
+
 
