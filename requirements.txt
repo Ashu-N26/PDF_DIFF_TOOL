@@ -1,13 +1,7 @@
-# Web UI
 streamlit==1.22.0
-
-# PDF processing & annotation (PyMuPDF provides 'fitz')
 PyMuPDF==1.23.6
-
-# PDF summary creation
 reportlab==3.6.13
-
-# Image support (used by PyMuPDF or if you expand previews)
 Pillow==9.5.0
+
 
 
