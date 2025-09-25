@@ -1,9 +1,13 @@
-streamlit==1.39.0
-PyMuPDF==1.24.9
-PyPDF2==3.0.1
-pdfplumber==0.11.0
-reportlab==4.2.5
-python-Levenshtein==0.25.1
-pandas==2.2.2
-numpy==1.26.4
+# Web UI
+streamlit==1.22.0
+
+# PDF processing & annotation (PyMuPDF provides 'fitz')
+PyMuPDF==1.23.6
+
+# PDF summary creation
+reportlab==3.6.13
+
+# Image support (used by PyMuPDF or if you expand previews)
+Pillow==9.5.0
+
 
