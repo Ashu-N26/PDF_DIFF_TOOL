@@ -1,28 +1,34 @@
-# Dockerfile
+# Use lightweight Python base image
 FROM python:3.11-slim
 
-WORKDIR /app
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system packages including tesseract for OCR and fonts/libs for Pillow
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system dependencies for PyMuPDF, Tesseract OCR, OpenCV
+RUN apt-get update && apt-get install -y \
     tesseract-ocr \
-    tesseract-ocr-eng \
-    libfreetype6-dev \
-    libjpeg-dev \
-    zlib1g-dev \
-    libopenjp2-7-dev \
-    ghostscript \
+    libtesseract-dev \
+    poppler-utils \
     build-essential \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Set working directory
+WORKDIR /app
+
+# Copy dependencies first (for caching)
 COPY requirements.txt .
 
-RUN pip install --upgrade pip
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy all project files
 COPY . .
 
-EXPOSE 8501
+# Expose port for Render
+EXPOSE 8000
 
-CMD ["sh", "-c", "streamlit run app.py --server.port $PORT --server.address 0.0.0.0"]
+# Run Streamlit app
+CMD ["streamlit", "run", "app.py", "--server.port=8000", "--server.address=0.0.0.0"]
+
 
