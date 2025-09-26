@@ -1,19 +1,27 @@
-# PDF Diff Tool
+# 📄 PDF_DIFF TOOL
 
-A web-based PDF comparison tool that:
-- Highlights inserted (green) and changed (red) text inline.
-- Appends a summary panel of removed data.
-- Generates **Annotated PDF** and **Side-by-Side PDF**.
-- Deployable on **Render** or **Streamlit Cloud**.
+A web-based tool to compare **two PDFs** (Old vs New) with:
+- ✅ Side-by-Side Preview
+- ✅ Annotated PDF highlighting:
+  - 🟢 Inserted text (green, 50% opacity)
+  - 🔴 Changed text (red, 50% opacity)
+  - Removed text → captured in **Summary Panel**
 
-### Deployment (Render)
-1. Push repo to GitHub.
-2. Create a **Web Service** on Render.
-3. Connect repo, set build to **Python 3.11+**.
-4. Render installs `requirements.txt` and uses `Procfile` to run.
+## 🚀 Features
+- OCR support → no text is missed
+- Character-level (sub-token) diff highlighting
+- Proper resizing & alignment for different layouts
+- Download options:
+  - Side-by-Side Comparison PDF
+  - Annotated Comparison PDF with Summary
 
----
+## 🛠 Deployment
+This repo is Dockerized for **Render** deployment.
 
-👨‍💻 Created by Ashutosh Nanaware
+### Run locally
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+
 
 
