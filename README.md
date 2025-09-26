@@ -7,6 +7,8 @@ A web-based tool to compare **two PDFs** (Old vs New) with:
   - 🔴 Changed text (red, 50% opacity)
   - Removed text → captured in **Summary Panel**
 
+---
+
 ## 🚀 Features
 - OCR support → no text is missed
 - Character-level (sub-token) diff highlighting
@@ -15,6 +17,8 @@ A web-based tool to compare **two PDFs** (Old vs New) with:
   - Side-by-Side Comparison PDF
   - Annotated Comparison PDF with Summary
 
+---
+
 ## 🛠 Deployment
 This repo is Dockerized for **Render** deployment.
 
@@ -22,6 +26,7 @@ This repo is Dockerized for **Render** deployment.
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
+
 
 
 
