@@ -1,39 +1,36 @@
 # app.py
 """
-Streamlit web UI for PDF_DIFF_TOOL
-Uses the functions provided in pdf_diff.py:
-  - process_and_generate(old_input, new_input, workdir=None, highlight_opacity=0.5, created_by=...)
-This UI:
-  - Upload OLD and NEW PDFs
-  - Run compare pipeline (annotated + side-by-side + summary)
-  - Preview results and provide downloads
+Streamlit UI for PDF_DIFF_TOOL
+Robust file upload handling using session_state so uploaded files do not "disappear".
+Calls process_and_generate(old_file, new_file, ...) from pdf_diff.py
 """
 
 import os
 import io
 import tempfile
 import base64
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 import streamlit as st
 
-# Import the real APIs from your pdf_diff.py
-# pdf_diff.py must export process_and_generate
+# Import the pipeline function from your pdf_diff implementation
 try:
     from pdf_diff import process_and_generate
 except Exception as e:
-    # Re-raise with clearer message for logs (Streamlit shows full traceback)
-    raise ImportError(f"Failed to import process_and_generate from pdf_diff.py: {e}") from e
+    # Fail fast with a clear message for logs if pdf_diff.py is missing or broken
+    raise ImportError(f"Could not import process_and_generate from pdf_diff.py: {e}") from e
 
-# Try to import fitz for on-page previews (optional but recommended)
+# Optional: preview renderer (PyMuPDF)
 try:
     import fitz  # PyMuPDF
 except Exception:
     fitz = None
 
-# Utilities
-def _save_uploaded_tmp(uploaded_file) -> str:
-    """Save Streamlit UploadedFile to a temp file and return its path."""
+# -------------------------
+# Utility helpers
+# -------------------------
+def save_streamlit_uploaded_to_tmp(uploaded_file) -> str:
+    """Save Streamlit UploadedFile to a temp file and return path."""
     suffix = os.path.splitext(uploaded_file.name)[1] or ".pdf"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.write(uploaded_file.read())
@@ -41,10 +38,10 @@ def _save_uploaded_tmp(uploaded_file) -> str:
     tmp.close()
     return tmp.name
 
-def _pdf_page_to_png_bytes(pdf_path: str, page_idx: int = 0, zoom: float = 1.25) -> bytes:
-    """Render a PDF page to PNG bytes using fitz. Returns PNG bytes."""
+def render_pdf_page_as_png_bytes(pdf_path: str, page_idx: int = 0, zoom: float = 1.25) -> bytes:
+    """Render the first page of a PDF to PNG bytes for inline image preview (requires PyMuPDF)."""
     if fitz is None:
-        raise RuntimeError("PyMuPDF (fitz) is not installed in the runtime; cannot render preview images.")
+        raise RuntimeError("PyMuPDF is not installed in the runtime. Install PyMuPDF to enable page previews.")
     doc = fitz.open(pdf_path)
     if page_idx < 0 or page_idx >= doc.page_count:
         doc.close()
@@ -52,132 +49,196 @@ def _pdf_page_to_png_bytes(pdf_path: str, page_idx: int = 0, zoom: float = 1.25)
     page = doc.load_page(page_idx)
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat, alpha=False)
-    png_bytes = pix.tobytes("png")
+    png = pix.tobytes("png")
     doc.close()
-    return png_bytes
+    return png
 
-def _display_pdf_inline(pdf_path: str, height: int = 700):
-    """Embed a PDF inline using a data URI for browsers that support it."""
-    with open(pdf_path, "rb") as f:
-        data = f.read()
-    b64 = base64.b64encode(data).decode("utf-8")
-    pdf_html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="{height}px"></iframe>'
-    st.components.v1.html(pdf_html, height=height)
-
-def _summary_to_dataframe(summary_rows: List[Dict[str, Any]]):
-    """Convert the summary rows into a simple table structure (list of dicts) for display."""
+def dataframe_from_summary(summary_rows: List[Dict[str, Any]]):
+    """Small helper to convert summary rows to dataframe for download/preview."""
     import pandas as pd
     if not summary_rows:
         return pd.DataFrame(columns=["page", "change_type", "old_snippet", "new_snippet"])
     df = pd.DataFrame(summary_rows)
-    # Standardize columns
-    expected = ["page", "change_type", "old_snippet", "new_snippet"]
-    for c in expected:
+    # Ensure standard column order
+    cols = ["page", "change_type", "old_snippet", "new_snippet"]
+    for c in cols:
         if c not in df.columns:
             df[c] = ""
-    return df[expected]
+    return df[cols]
 
+# -------------------------
 # Streamlit UI
+# -------------------------
 st.set_page_config(page_title="PDF_DIFF TOOL", layout="wide")
-st.markdown("<h1 style='text-align:center;'>PDF_DIFF TOOL</h1>", unsafe_allow_html=True)
-st.markdown("<div style='text-align:center; color:gray;'>Created by <b>Ashutosh Nanaware</b></div>", unsafe_allow_html=True)
-st.write("")  # spacing
+st.markdown("<h1 style='text-align:center'>PDF_DIFF TOOL</h1>", unsafe_allow_html=True)
+st.markdown("<div style='text-align:center; color:gray'>Created by <b>Ashutosh Nanaware</b></div>", unsafe_allow_html=True)
+st.write("")
 
-# Upload area
+# Sidebar options
+with st.sidebar:
+    st.header("Options")
+    highlight_opacity_percent = st.slider("Highlight opacity (%)", min_value=10, max_value=100, value=50)
+    highlight_opacity = highlight_opacity_percent / 100.0
+    created_by_text = st.text_input("Created by label", value="Ashutosh Nanaware")
+    show_debug = st.checkbox("Show debug state (session_state)", value=False)
+    st.markdown("---")
+    st.markdown("Tip: If upload seems to fail, check debug state for session contents and check browser console for network errors.")
+
+# Main upload area
 col1, col2 = st.columns(2)
+
 with col1:
-    old_pdf = st.file_uploader("Upload OLD PDF", type=["pdf"], key="old_uploader")
+    st.write("**Upload OLD PDF**")
+    # Use a stable key; saved object will be in st.session_state['old_uploader']
+    old_uploader = st.file_uploader("Old PDF", type=["pdf"], key="old_uploader")
+    # Persist to session_state wrapper to avoid being lost across reruns
+    if old_uploader is not None:
+        st.session_state["old_file_obj"] = old_uploader
+        st.session_state["old_file_name"] = getattr(old_uploader, "name", None)
+        st.session_state["old_file_size"] = getattr(old_uploader, "size", None)
+    # Show attached file info and allow removal
+    if st.session_state.get("old_file_obj"):
+        name = st.session_state.get("old_file_name")
+        size = st.session_state.get("old_file_size")
+        st.success(f"Attached: {name} ({size} bytes)")
+        if st.button("Remove OLD PDF"):
+            st.session_state.pop("old_file_obj", None)
+            st.session_state.pop("old_file_name", None)
+            st.session_state.pop("old_file_size", None)
+
 with col2:
-    new_pdf = st.file_uploader("Upload NEW PDF", type=["pdf"], key="new_uploader")
+    st.write("**Upload NEW PDF**")
+    new_uploader = st.file_uploader("New PDF", type=["pdf"], key="new_uploader")
+    if new_uploader is not None:
+        st.session_state["new_file_obj"] = new_uploader
+        st.session_state["new_file_name"] = getattr(new_uploader, "name", None)
+        st.session_state["new_file_size"] = getattr(new_uploader, "size", None)
+    if st.session_state.get("new_file_obj"):
+        name = st.session_state.get("new_file_name")
+        size = st.session_state.get("new_file_size")
+        st.success(f"Attached: {name} ({size} bytes)")
+        if st.button("Remove NEW PDF"):
+            st.session_state.pop("new_file_obj", None)
+            st.session_state.pop("new_file_name", None)
+            st.session_state.pop("new_file_size", None)
 
 st.markdown("---")
 
-if old_pdf and new_pdf:
-    st.success("Both PDFs uploaded successfully ✅")
-    # Options
-    st.sidebar.header("Comparison Options")
-    highlight_opacity = st.sidebar.slider("Highlight opacity (%)", 10, 100, 50) / 100.0
-    created_by = st.sidebar.text_input("Created by label", value="Ashutosh Nanaware")
-    run_button = st.button("🔍 Compare PDFs")
+# Show debug session state if asked
+if show_debug:
+    st.subheader("Session State Debug")
+    safe_keys = {k: (type(v).__name__ if k.startswith("old") or k.startswith("new") else repr(v)) for k,v in st.session_state.items()}
+    st.json(safe_keys)
 
-    if run_button:
-        # Use spinner during processing
-        with st.spinner("Running comparison pipeline — this can take a while for large PDFs..."):
+# Validate upload presence
+old_present = "old_file_obj" in st.session_state and st.session_state["old_file_obj"] is not None
+new_present = "new_file_obj" in st.session_state and st.session_state["new_file_obj"] is not None
+
+if not old_present or not new_present:
+    st.info("Upload both OLD and NEW PDFs to begin comparison.")
+else:
+    # show a small summary card
+    st.success("Both PDFs attached. You can now run the comparison.")
+    # Provide a "Compare" button so user explicitly starts long job
+    if st.button("🔍 Compare PDFs"):
+        # Save uploaded files to temp files (process_and_generate accepts file-like OR path, but writing to disk is stable)
+        try:
+            old_uploaded = st.session_state["old_file_obj"]
+            new_uploaded = st.session_state["new_file_obj"]
+
+            # Save to temp paths so the diff engine can open them repeatedly without stream exhaustion
+            old_tmp_path = save_streamlit_uploaded_to_tmp = None
+        except Exception:
+            old_tmp_path = None
+
+        # Save to filesystem (robust)
+        try:
+            old_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+            old_tmp.write(st.session_state["old_file_obj"].read())
+            old_tmp.flush()
+            old_tmp.close()
+            old_tmp_path = old_tmp.name
+
+            new_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+            new_tmp.write(st.session_state["new_file_obj"].read())
+            new_tmp.flush()
+            new_tmp.close()
+            new_tmp_path = new_tmp.name
+        except Exception as e:
+            st.error(f"Failed to write uploaded files to disk: {e}")
+            raise
+
+        # Run pipeline
+        with st.spinner("Running PDF comparison — this may take a minute for larger files..."):
             try:
-                # Pass file-like objects directly to process_and_generate (pdf_diff handles file-like)
-                annotated_path, side_by_side_path, summary_rows = process_and_generate(
-                    old_pdf, new_pdf, highlight_opacity=highlight_opacity, created_by=created_by
+                annotated_out, side_by_side_out, summary_rows = process_and_generate(
+                    old_tmp_path,
+                    new_tmp_path,
+                    highlight_opacity=highlight_opacity,
+                    created_by=created_by_text
                 )
             except Exception as e:
-                st.error(f"Processing failed: {e}")
-                # Print log guidance
-                st.info("Check server logs (Render or Streamlit logs) for full traceback.")
+                st.error(f"Comparison failed: {e}")
+                st.exception(e)
                 raise
 
-        st.success("Comparison finished ✅")
-        st.markdown("### Outputs")
+        st.success("Comparison completed ✅")
 
-        # Summary panel
-        st.subheader("📊 Summary Panel")
-        df = _summary_to_dataframe(summary_rows)
+        # Summary table
+        st.header("Summary of Changes")
+        df = dataframe_from_summary(summary_rows)
         st.dataframe(df, use_container_width=True)
-        csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Download Summary CSV", data=csv, file_name="summary.csv", mime="text/csv")
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇ Download summary CSV", data=csv_bytes, file_name="summary.csv", mime="text/csv")
 
         st.markdown("---")
-        # Side-by-side preview (image-based)
-        st.subheader("🖼 Side-by-Side Preview")
-        if os.path.exists(side_by_side_path):
+
+        # Side-by-side preview & download
+        st.subheader("Side-by-Side (Old | New)")
+        if os.path.exists(side_by_side_out):
             try:
-                # Show first page preview (image)
                 if fitz is not None:
-                    png_bytes = _pdf_page_to_png_bytes(side_by_side_path, page_idx=0, zoom=1.25)
-                    st.image(png_bytes, use_column_width=True)
-                else:
-                    st.info("PyMuPDF not available to render inline preview; download the Side-by-Side PDF instead.")
-                with open(side_by_side_path, "rb") as f:
-                    sb_bytes = f.read()
-                st.download_button("⬇️ Download Side-by-Side PDF", data=sb_bytes, file_name="side_by_side.pdf", mime="application/pdf")
+                    png = render_pdf_page_as_png_bytes(side_by_side_out, page_idx=0, zoom=1.25)
+                    st.image(png, use_column_width=True)
+                with open(side_by_side_out, "rb") as f:
+                    st.download_button("⬇ Download Side-by-Side PDF", data=f.read(), file_name="side_by_side.pdf", mime="application/pdf")
             except Exception as e:
-                st.warning(f"Could not render side-by-side preview: {e}")
-                # Offer download anyway
+                st.warning(f"Preview failed: {e}")
+                # still allow download
                 try:
-                    with open(side_by_side_path, "rb") as f:
-                        st.download_button("⬇️ Download Side-by-Side PDF", data=f.read(), file_name="side_by_side.pdf", mime="application/pdf")
+                    with open(side_by_side_out, "rb") as f:
+                        st.download_button("⬇ Download Side-by-Side PDF", data=f.read(), file_name="side_by_side.pdf", mime="application/pdf")
                 except Exception:
-                    st.error("Side-by-side PDF not found for download.")
+                    st.error("Side-by-side PDF not available.")
         else:
-            st.warning("Side-by-side PDF was not generated.")
+            st.warning("Side-by-side PDF not generated.")
 
         st.markdown("---")
-        # Annotated PDF preview and download
-        st.subheader("🖍 Annotated PDF (NEW PDF with highlights + Summary panel appended)")
-        if os.path.exists(annotated_path):
+
+        # Annotated PDF preview & download
+        st.subheader("Annotated NEW PDF (highlights + summary appended)")
+        if os.path.exists(annotated_out):
             try:
-                # Render first page preview of annotated PDF
                 if fitz is not None:
-                    png_bytes = _pdf_page_to_png_bytes(annotated_path, page_idx=0, zoom=1.25)
-                    st.image(png_bytes, use_column_width=True)
-                else:
-                    st.info("PyMuPDF not available to render annotated preview; download the Annotated PDF instead.")
-                with open(annotated_path, "rb") as f:
-                    a_bytes = f.read()
-                st.download_button("⬇️ Download Annotated PDF", data=a_bytes, file_name="annotated_with_summary.pdf", mime="application/pdf")
+                    png = render_pdf_page_as_png_bytes(annotated_out, page_idx=0, zoom=1.25)
+                    st.image(png, use_column_width=True)
+                with open(annotated_out, "rb") as f:
+                    st.download_button("⬇ Download Annotated PDF", data=f.read(), file_name="annotated_with_summary.pdf", mime="application/pdf")
             except Exception as e:
-                st.warning(f"Could not render annotated preview: {e}")
+                st.warning(f"Annotated preview failed: {e}")
                 try:
-                    with open(annotated_path, "rb") as f:
-                        st.download_button("⬇️ Download Annotated PDF", data=f.read(), file_name="annotated_with_summary.pdf", mime="application/pdf")
+                    with open(annotated_out, "rb") as f:
+                        st.download_button("⬇ Download Annotated PDF", data=f.read(), file_name="annotated_with_summary.pdf", mime="application/pdf")
                 except Exception:
-                    st.error("Annotated PDF not found for download.")
+                    st.error("Annotated PDF not available.")
         else:
-            st.warning("Annotated PDF was not generated.")
+            st.warning("Annotated PDF not generated.")
 
         st.markdown("---")
-        st.info("If previews are not visible, download the generated PDFs and open them locally.")
-else:
-    st.info("Upload both OLD and NEW PDFs to begin comparison.")
+        st.info("If previews look empty, download PDFs and open them locally in Acrobat/Reader for best fidelity.")
 
+# Footer
 st.markdown("<hr><div style='text-align:center; color:gray;'>© 2025 Created by Ashutosh Nanaware. All rights reserved.</div>", unsafe_allow_html=True)
+
 
 
