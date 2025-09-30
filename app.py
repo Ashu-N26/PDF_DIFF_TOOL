@@ -1,152 +1,183 @@
+# app.py
+"""
+Streamlit web UI for PDF_DIFF_TOOL
+Uses the functions provided in pdf_diff.py:
+  - process_and_generate(old_input, new_input, workdir=None, highlight_opacity=0.5, created_by=...)
+This UI:
+  - Upload OLD and NEW PDFs
+  - Run compare pipeline (annotated + side-by-side + summary)
+  - Preview results and provide downloads
+"""
+
 import os
 import io
-import sys
 import tempfile
-from pathlib import Path
+import base64
 from typing import List, Dict, Any
 
 import streamlit as st
 
-# Import our advanced PDF diff engine
-from pdf_diff import (
-    PDFComparator,
-    DiffResult,
-    SummaryStats,
-    AnnotatedPDFExporter,
-    SideBySideExporter
-)
+# Import the real APIs from your pdf_diff.py
+# pdf_diff.py must export process_and_generate
+try:
+    from pdf_diff import process_and_generate
+except Exception as e:
+    # Re-raise with clearer message for logs (Streamlit shows full traceback)
+    raise ImportError(f"Failed to import process_and_generate from pdf_diff.py: {e}") from e
 
-# ------------------------------
-# Utility Functions
-# ------------------------------
+# Try to import fitz for on-page previews (optional but recommended)
+try:
+    import fitz  # PyMuPDF
+except Exception:
+    fitz = None
 
-def save_uploaded_file(uploaded_file, suffix=".pdf") -> str:
-    """Save uploaded file to a temporary path."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.read())
-        return tmp.name
+# Utilities
+def _save_uploaded_tmp(uploaded_file) -> str:
+    """Save Streamlit UploadedFile to a temp file and return its path."""
+    suffix = os.path.splitext(uploaded_file.name)[1] or ".pdf"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(uploaded_file.read())
+    tmp.flush()
+    tmp.close()
+    return tmp.name
 
+def _pdf_page_to_png_bytes(pdf_path: str, page_idx: int = 0, zoom: float = 1.25) -> bytes:
+    """Render a PDF page to PNG bytes using fitz. Returns PNG bytes."""
+    if fitz is None:
+        raise RuntimeError("PyMuPDF (fitz) is not installed in the runtime; cannot render preview images.")
+    doc = fitz.open(pdf_path)
+    if page_idx < 0 or page_idx >= doc.page_count:
+        doc.close()
+        raise IndexError("page index out of range")
+    page = doc.load_page(page_idx)
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    png_bytes = pix.tobytes("png")
+    doc.close()
+    return png_bytes
 
-def render_summary_panel(stats: SummaryStats):
-    """Render summary panel with statistics and metrics."""
-    st.subheader("📊 Summary Panel")
-    col1, col2, col3, col4 = st.columns(4)
+def _display_pdf_inline(pdf_path: str, height: int = 700):
+    """Embed a PDF inline using a data URI for browsers that support it."""
+    with open(pdf_path, "rb") as f:
+        data = f.read()
+    b64 = base64.b64encode(data).decode("utf-8")
+    pdf_html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="{height}px"></iframe>'
+    st.components.v1.html(pdf_html, height=height)
 
-    col1.metric("Total Pages", stats.total_pages)
-    col2.metric("Pages Changed", stats.pages_changed)
-    col3.metric("Glyph Differences", stats.glyph_diffs)
-    col4.metric("Layout Adjustments", stats.layout_changes)
+def _summary_to_dataframe(summary_rows: List[Dict[str, Any]]):
+    """Convert the summary rows into a simple table structure (list of dicts) for display."""
+    import pandas as pd
+    if not summary_rows:
+        return pd.DataFrame(columns=["page", "change_type", "old_snippet", "new_snippet"])
+    df = pd.DataFrame(summary_rows)
+    # Standardize columns
+    expected = ["page", "change_type", "old_snippet", "new_snippet"]
+    for c in expected:
+        if c not in df.columns:
+            df[c] = ""
+    return df[expected]
 
-    st.write("#### Page-by-Page Diff Stats")
-    for pg, detail in stats.page_details.items():
-        st.markdown(f"- **Page {pg}**: {detail}")
+# Streamlit UI
+st.set_page_config(page_title="PDF_DIFF TOOL", layout="wide")
+st.markdown("<h1 style='text-align:center;'>PDF_DIFF TOOL</h1>", unsafe_allow_html=True)
+st.markdown("<div style='text-align:center; color:gray;'>Created by <b>Ashutosh Nanaware</b></div>", unsafe_allow_html=True)
+st.write("")  # spacing
 
+# Upload area
+col1, col2 = st.columns(2)
+with col1:
+    old_pdf = st.file_uploader("Upload OLD PDF", type=["pdf"], key="old_uploader")
+with col2:
+    new_pdf = st.file_uploader("Upload NEW PDF", type=["pdf"], key="new_uploader")
 
-def render_side_by_side(diff_result: DiffResult):
-    """Render side-by-side comparison view."""
-    st.subheader("🖼️ Side-by-Side Comparison")
+st.markdown("---")
 
-    try:
-        exporter = SideBySideExporter(diff_result)
-        side_by_side_pdf = exporter.export()
+if old_pdf and new_pdf:
+    st.success("Both PDFs uploaded successfully ✅")
+    # Options
+    st.sidebar.header("Comparison Options")
+    highlight_opacity = st.sidebar.slider("Highlight opacity (%)", 10, 100, 50) / 100.0
+    created_by = st.sidebar.text_input("Created by label", value="Ashutosh Nanaware")
+    run_button = st.button("🔍 Compare PDFs")
 
-        st.download_button(
-            label="⬇️ Download Side-by-Side PDF",
-            data=side_by_side_pdf,
-            file_name="side_by_side_comparison.pdf",
-            mime="application/pdf"
-        )
+    if run_button:
+        # Use spinner during processing
+        with st.spinner("Running comparison pipeline — this can take a while for large PDFs..."):
+            try:
+                # Pass file-like objects directly to process_and_generate (pdf_diff handles file-like)
+                annotated_path, side_by_side_path, summary_rows = process_and_generate(
+                    old_pdf, new_pdf, highlight_opacity=highlight_opacity, created_by=created_by
+                )
+            except Exception as e:
+                st.error(f"Processing failed: {e}")
+                # Print log guidance
+                st.info("Check server logs (Render or Streamlit logs) for full traceback.")
+                raise
 
-        st.success("Side-by-side PDF generated successfully!")
-    except Exception as e:
-        st.error(f"Error generating side-by-side PDF: {e}")
+        st.success("Comparison finished ✅")
+        st.markdown("### Outputs")
 
-
-def render_annotated(diff_result: DiffResult):
-    """Render annotated PDF export view."""
-    st.subheader("✏️ Annotated Export")
-
-    try:
-        exporter = AnnotatedPDFExporter(diff_result)
-        annotated_pdf = exporter.export()
-
-        st.download_button(
-            label="⬇️ Download Annotated PDF",
-            data=annotated_pdf,
-            file_name="annotated_diff.pdf",
-            mime="application/pdf"
-        )
-
-        st.success("Annotated PDF generated successfully!")
-    except Exception as e:
-        st.error(f"Error generating annotated PDF: {e}")
-
-
-# ------------------------------
-# Streamlit App Layout
-# ------------------------------
-
-def main():
-    st.set_page_config(page_title="Advanced PDF Diff Tool", layout="wide")
-    st.title("📑 Advanced PDF Diff Tool")
-    st.caption("Compare two PDFs with glyph-level precision, layout normalization, and Adobe-like rendering")
-
-    with st.sidebar:
-        st.header("⚙️ Upload PDFs")
-        file1 = st.file_uploader("Upload First PDF", type=["pdf"])
-        file2 = st.file_uploader("Upload Second PDF", type=["pdf"])
-
-        normalize_layout = st.checkbox("Normalize Layout", value=True)
-        per_char_diff = st.checkbox("Enable Per-Character Glyph Diffs", value=True)
-        resize_pages = st.checkbox("Resize Pages Before Diff", value=True)
+        # Summary panel
+        st.subheader("📊 Summary Panel")
+        df = _summary_to_dataframe(summary_rows)
+        st.dataframe(df, use_container_width=True)
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Download Summary CSV", data=csv, file_name="summary.csv", mime="text/csv")
 
         st.markdown("---")
-        st.markdown("**Export Options**")
-        want_side_by_side = st.checkbox("Generate Side-by-Side PDF", value=True)
-        want_annotated = st.checkbox("Generate Annotated PDF", value=True)
-
-    if file1 and file2:
-        path1 = save_uploaded_file(file1)
-        path2 = save_uploaded_file(file2)
-
-        st.info("🔍 Processing PDFs...")
-        try:
-            comparator = PDFComparator(
-                normalize_layout=normalize_layout,
-                per_char=per_char_diff,
-                resize_pages=resize_pages
-            )
-
-            diff_result: DiffResult = comparator.compare(path1, path2)
-
-            # Tabs for navigation
-            tab1, tab2, tab3 = st.tabs(["Summary Panel", "Side-by-Side Export", "Annotated Export"])
-
-            with tab1:
-                render_summary_panel(diff_result.stats)
-
-            with tab2:
-                if want_side_by_side:
-                    render_side_by_side(diff_result)
+        # Side-by-side preview (image-based)
+        st.subheader("🖼 Side-by-Side Preview")
+        if os.path.exists(side_by_side_path):
+            try:
+                # Show first page preview (image)
+                if fitz is not None:
+                    png_bytes = _pdf_page_to_png_bytes(side_by_side_path, page_idx=0, zoom=1.25)
+                    st.image(png_bytes, use_column_width=True)
                 else:
-                    st.info("Side-by-Side export is disabled in options.")
+                    st.info("PyMuPDF not available to render inline preview; download the Side-by-Side PDF instead.")
+                with open(side_by_side_path, "rb") as f:
+                    sb_bytes = f.read()
+                st.download_button("⬇️ Download Side-by-Side PDF", data=sb_bytes, file_name="side_by_side.pdf", mime="application/pdf")
+            except Exception as e:
+                st.warning(f"Could not render side-by-side preview: {e}")
+                # Offer download anyway
+                try:
+                    with open(side_by_side_path, "rb") as f:
+                        st.download_button("⬇️ Download Side-by-Side PDF", data=f.read(), file_name="side_by_side.pdf", mime="application/pdf")
+                except Exception:
+                    st.error("Side-by-side PDF not found for download.")
+        else:
+            st.warning("Side-by-side PDF was not generated.")
 
-            with tab3:
-                if want_annotated:
-                    render_annotated(diff_result)
+        st.markdown("---")
+        # Annotated PDF preview and download
+        st.subheader("🖍 Annotated PDF (NEW PDF with highlights + Summary panel appended)")
+        if os.path.exists(annotated_path):
+            try:
+                # Render first page preview of annotated PDF
+                if fitz is not None:
+                    png_bytes = _pdf_page_to_png_bytes(annotated_path, page_idx=0, zoom=1.25)
+                    st.image(png_bytes, use_column_width=True)
                 else:
-                    st.info("Annotated export is disabled in options.")
+                    st.info("PyMuPDF not available to render annotated preview; download the Annotated PDF instead.")
+                with open(annotated_path, "rb") as f:
+                    a_bytes = f.read()
+                st.download_button("⬇️ Download Annotated PDF", data=a_bytes, file_name="annotated_with_summary.pdf", mime="application/pdf")
+            except Exception as e:
+                st.warning(f"Could not render annotated preview: {e}")
+                try:
+                    with open(annotated_path, "rb") as f:
+                        st.download_button("⬇️ Download Annotated PDF", data=f.read(), file_name="annotated_with_summary.pdf", mime="application/pdf")
+                except Exception:
+                    st.error("Annotated PDF not found for download.")
+        else:
+            st.warning("Annotated PDF was not generated.")
 
-        except Exception as e:
-            st.error(f"❌ Comparison failed: {e}")
-    else:
-        st.warning("Please upload two PDF files to start comparison.")
+        st.markdown("---")
+        st.info("If previews are not visible, download the generated PDFs and open them locally.")
+else:
+    st.info("Upload both OLD and NEW PDFs to begin comparison.")
 
+st.markdown("<hr><div style='text-align:center; color:gray;'>© 2025 Created by Ashutosh Nanaware. All rights reserved.</div>", unsafe_allow_html=True)
 
-# ------------------------------
-# Entrypoint
-# ------------------------------
-
-if __name__ == "__main__":
-    main()
 
