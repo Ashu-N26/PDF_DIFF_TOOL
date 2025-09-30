@@ -1,192 +1,152 @@
-#!/usr/bin/env python3
-"""
-app.py - Frontend CLI wrapper for the advanced PDF diff engine (pdf_diff.py)
-
-This script provides a high-level application interface for analysts and QA teams
-to run structured PDF comparisons using the rich set of diffing tools.
-
-Features:
-    - Command line interface for configuring comparisons
-    - Integration with SummaryPanel, AnnotatedExport, and SideBySideExport
-    - Verbose logging and graceful error handling
-    - Analyst-friendly reporting output
-    - Configurable thresholds for diff sensitivity
-
-Author: Ashutosh Nanaware
-"""
-
-import argparse
-import logging
-import sys
 import os
+import io
+import sys
+import tempfile
 from pathlib import Path
-from datetime import datetime
+from typing import List, Dict, Any
 
-# Import core diffing classes from pdf_diff.py
-try:
-    from pdf_diff import (
-        PDFComparator,
-        SummaryPanel,
-        AnnotatedExporter,
-        SideBySideExporter,
-        DiffMode,
-        DiffResult,
-    )
-except ImportError as e:
-    print("Error: Could not import from pdf_diff.py. Make sure it is installed or in the same directory.")
-    sys.exit(1)
+import streamlit as st
 
-# ---------------------------------------------------------------------------
-# Logging Configuration
-# ---------------------------------------------------------------------------
-def configure_logging(verbosity: int):
-    """Setup logging based on user verbosity level."""
-    log_level = logging.WARNING
-    if verbosity == 1:
-        log_level = logging.INFO
-    elif verbosity >= 2:
-        log_level = logging.DEBUG
+# Import our advanced PDF diff engine
+from pdf_diff import (
+    PDFComparator,
+    DiffResult,
+    SummaryStats,
+    AnnotatedPDFExporter,
+    SideBySideExporter
+)
 
-    logging.basicConfig(
-        level=log_level,
-        format="[%(asctime)s] [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
+# ------------------------------
+# Utility Functions
+# ------------------------------
+
+def save_uploaded_file(uploaded_file, suffix=".pdf") -> str:
+    """Save uploaded file to a temporary path."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.read())
+        return tmp.name
 
 
-# ---------------------------------------------------------------------------
-# CLI Parser
-# ---------------------------------------------------------------------------
-def build_parser() -> argparse.ArgumentParser:
-    """Builds the CLI parser with detailed options."""
-    parser = argparse.ArgumentParser(
-        description="Advanced PDF Difference Analyzer - Analyst Edition",
-        epilog="Example: python app.py file1.pdf file2.pdf --mode overlay --out result.pdf"
-    )
+def render_summary_panel(stats: SummaryStats):
+    """Render summary panel with statistics and metrics."""
+    st.subheader("📊 Summary Panel")
+    col1, col2, col3, col4 = st.columns(4)
 
-    parser.add_argument("pdf_a", help="Path to the first PDF (baseline/reference)")
-    parser.add_argument("pdf_b", help="Path to the second PDF (comparison/revision)")
+    col1.metric("Total Pages", stats.total_pages)
+    col2.metric("Pages Changed", stats.pages_changed)
+    col3.metric("Glyph Differences", stats.glyph_diffs)
+    col4.metric("Layout Adjustments", stats.layout_changes)
 
-    parser.add_argument(
-        "--mode",
-        choices=["text", "image", "overlay", "hybrid"],
-        default="overlay",
-        help="Comparison mode: text = semantic text diff, image = render & pixel diff, "
-             "overlay = graphical overlay (Adobe-like), hybrid = combine text+visual"
-    )
-
-    parser.add_argument(
-        "--out",
-        type=str,
-        default="pdf_diff_output.pdf",
-        help="Output file path for annotated or exported PDF"
-    )
-
-    parser.add_argument(
-        "--summary",
-        action="store_true",
-        help="Generate a summary report of differences"
-    )
-
-    parser.add_argument(
-        "--side-by-side",
-        action="store_true",
-        help="Export results in side-by-side comparison format"
-    )
-
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.02,
-        help="Threshold for difference sensitivity (0.0 - 1.0, smaller is stricter)"
-    )
-
-    parser.add_argument(
-        "--max-pages",
-        type=int,
-        default=0,
-        help="Maximum number of pages to compare (0 = all)"
-    )
-
-    parser.add_argument(
-        "-v", "--verbose",
-        action="count",
-        default=0,
-        help="Increase verbosity (-v, -vv)"
-    )
-
-    return parser
+    st.write("#### Page-by-Page Diff Stats")
+    for pg, detail in stats.page_details.items():
+        st.markdown(f"- **Page {pg}**: {detail}")
 
 
-# ---------------------------------------------------------------------------
-# Application Workflow
-# ---------------------------------------------------------------------------
-def run_app(args):
-    """Main execution workflow for the PDF diff application."""
-
-    # Validate files
-    pdf_a_path = Path(args.pdf_a)
-    pdf_b_path = Path(args.pdf_b)
-
-    if not pdf_a_path.exists() or not pdf_b_path.exists():
-        logging.error("One or both PDF files do not exist.")
-        sys.exit(1)
-
-    logging.info(f"Loading PDFs: {pdf_a_path} vs {pdf_b_path}")
-
-    # Initialize comparator
-    comparator = PDFComparator(
-        file_a=str(pdf_a_path),
-        file_b=str(pdf_b_path),
-        mode=DiffMode(args.mode),
-        threshold=args.threshold,
-        max_pages=args.max_pages if args.max_pages > 0 else None,
-    )
-
-    # Perform diff
-    logging.info("Running PDF comparison...")
-    result: DiffResult = comparator.compare()
-    logging.info("Comparison complete.")
-
-    # Generate summary
-    if args.summary:
-        summary = SummaryPanel(result)
-        report = summary.generate()
-        print("\n=== SUMMARY PANEL ===")
-        print(report)
-        print("=====================\n")
-
-    # Export annotated output
-    if result.has_differences():
-        if args.side_by_side:
-            exporter = SideBySideExporter(result)
-            exporter.export(args.out)
-            logging.info(f"Side-by-side diff exported to {args.out}")
-        else:
-            exporter = AnnotatedExporter(result)
-            exporter.export(args.out)
-            logging.info(f"Annotated diff exported to {args.out}")
-    else:
-        logging.info("No differences found; no output file created.")
-
-    print("\nTask completed at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-
-# ---------------------------------------------------------------------------
-# Entry Point
-# ---------------------------------------------------------------------------
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
-
-    configure_logging(args.verbose)
+def render_side_by_side(diff_result: DiffResult):
+    """Render side-by-side comparison view."""
+    st.subheader("🖼️ Side-by-Side Comparison")
 
     try:
-        run_app(args)
-    except Exception as e:
-        logging.exception("Fatal error during PDF diff process")
-        sys.exit(1)
+        exporter = SideBySideExporter(diff_result)
+        side_by_side_pdf = exporter.export()
 
+        st.download_button(
+            label="⬇️ Download Side-by-Side PDF",
+            data=side_by_side_pdf,
+            file_name="side_by_side_comparison.pdf",
+            mime="application/pdf"
+        )
+
+        st.success("Side-by-side PDF generated successfully!")
+    except Exception as e:
+        st.error(f"Error generating side-by-side PDF: {e}")
+
+
+def render_annotated(diff_result: DiffResult):
+    """Render annotated PDF export view."""
+    st.subheader("✏️ Annotated Export")
+
+    try:
+        exporter = AnnotatedPDFExporter(diff_result)
+        annotated_pdf = exporter.export()
+
+        st.download_button(
+            label="⬇️ Download Annotated PDF",
+            data=annotated_pdf,
+            file_name="annotated_diff.pdf",
+            mime="application/pdf"
+        )
+
+        st.success("Annotated PDF generated successfully!")
+    except Exception as e:
+        st.error(f"Error generating annotated PDF: {e}")
+
+
+# ------------------------------
+# Streamlit App Layout
+# ------------------------------
+
+def main():
+    st.set_page_config(page_title="Advanced PDF Diff Tool", layout="wide")
+    st.title("📑 Advanced PDF Diff Tool")
+    st.caption("Compare two PDFs with glyph-level precision, layout normalization, and Adobe-like rendering")
+
+    with st.sidebar:
+        st.header("⚙️ Upload PDFs")
+        file1 = st.file_uploader("Upload First PDF", type=["pdf"])
+        file2 = st.file_uploader("Upload Second PDF", type=["pdf"])
+
+        normalize_layout = st.checkbox("Normalize Layout", value=True)
+        per_char_diff = st.checkbox("Enable Per-Character Glyph Diffs", value=True)
+        resize_pages = st.checkbox("Resize Pages Before Diff", value=True)
+
+        st.markdown("---")
+        st.markdown("**Export Options**")
+        want_side_by_side = st.checkbox("Generate Side-by-Side PDF", value=True)
+        want_annotated = st.checkbox("Generate Annotated PDF", value=True)
+
+    if file1 and file2:
+        path1 = save_uploaded_file(file1)
+        path2 = save_uploaded_file(file2)
+
+        st.info("🔍 Processing PDFs...")
+        try:
+            comparator = PDFComparator(
+                normalize_layout=normalize_layout,
+                per_char=per_char_diff,
+                resize_pages=resize_pages
+            )
+
+            diff_result: DiffResult = comparator.compare(path1, path2)
+
+            # Tabs for navigation
+            tab1, tab2, tab3 = st.tabs(["Summary Panel", "Side-by-Side Export", "Annotated Export"])
+
+            with tab1:
+                render_summary_panel(diff_result.stats)
+
+            with tab2:
+                if want_side_by_side:
+                    render_side_by_side(diff_result)
+                else:
+                    st.info("Side-by-Side export is disabled in options.")
+
+            with tab3:
+                if want_annotated:
+                    render_annotated(diff_result)
+                else:
+                    st.info("Annotated export is disabled in options.")
+
+        except Exception as e:
+            st.error(f"❌ Comparison failed: {e}")
+    else:
+        st.warning("Please upload two PDF files to start comparison.")
+
+
+# ------------------------------
+# Entrypoint
+# ------------------------------
 
 if __name__ == "__main__":
     main()
+
