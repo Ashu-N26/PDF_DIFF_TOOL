@@ -1,27 +1,43 @@
+# -------------------------------
+# PDF_DIFF_TOOL Dockerfile for Render
+# -------------------------------
+
+# Base Python image (small + stable)
 FROM python:3.11-slim
 
-# Install system deps for tesseract + basic build tools
-RUN apt-get update && apt-get install -y \
+# Avoid interactive prompts during apt install
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies for OCR, PDF processing and build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     tesseract-ocr \
     libtesseract-dev \
     libleptonica-dev \
-    pkg-config \
     poppler-utils \
- && rm -rf /var/lib/apt/lists/*
+    ghostscript \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python deps
+# Set working directory inside container
 WORKDIR /app
+
+# Copy requirements first (to leverage Docker layer caching)
 COPY requirements.txt /app/
-RUN pip install --upgrade pip wheel
+
+# Install Python dependencies
+RUN pip install --upgrade pip wheel setuptools
 RUN pip install -r requirements.txt
 
-# Copy app source
+# Copy full app source code
 COPY . /app
 
-# Streamlit run (example)
+# Expose Streamlit’s default port
 EXPOSE 8501
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+# Run Streamlit app with proper network binding for Render
+CMD ["streamlit", "run", "app.py", "--server.port=10000", "--server.address=0.0.0.0"]
+
 
 
 
