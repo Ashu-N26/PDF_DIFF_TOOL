@@ -1,8 +1,29 @@
-streamlit==1.39.0
-PyMuPDF==1.24.10
-reportlab==4.2.2
-pytesseract==0.3.10
-Pillow==10.3.0
+# Core UI
+streamlit==1.36.0
+
+# PDF rendering / text extraction / low-level parsing
+PyMuPDF==1.22.5           # provides `fitz` — fast PDF rendering and bbox extraction
+pdfminer.six==20221105    # robust PDF text/layout extraction
+pdfplumber==0.11.0        # convenient wrapper around pdfminer for structured extraction
+
+# PDF manipulation & generation
+PyPDF2==3.0.1
+reportlab==3.6.13         # create summary page, PDF overlays
+
+# Images & OCR
+Pillow==10.0.0
+pytesseract==0.3.10       # Python binding for tesseract OCR (system tesseract required)
+
+# Numerical & image processing (used for precision diffs & optional visual ops)
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+
+# Data tables / summary export
 pandas==2.2.2
+
+# Utilities (small helpful packages)
+pdf2image==1.16.3         # optional; only if you need alternative render paths
+tqdm==4.66.1              # progress bars (optional/debugging)
+
 
 
