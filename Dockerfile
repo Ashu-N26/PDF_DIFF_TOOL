@@ -1,38 +1,28 @@
-# Dockerfile (use this exact content)
 FROM python:3.11-slim
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-WORKDIR /app
-
-# Install system packages needed by PyMuPDF, Tesseract OCR, and Streamlit
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system deps for tesseract + basic build tools
+RUN apt-get update && apt-get install -y \
     build-essential \
-    libgl1 \
-    libglib2.0-0 \
     tesseract-ocr \
+    libtesseract-dev \
+    libleptonica-dev \
+    pkg-config \
     poppler-utils \
-    ghostscript \
-    && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies
-COPY requirements.txt /app/requirements.txt
-RUN python -m pip install --upgrade pip
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# Copy requirements and install Python deps
+WORKDIR /app
+COPY requirements.txt /app/
+RUN pip install --upgrade pip wheel
+RUN pip install -r requirements.txt
 
-# Copy project files
+# Copy app source
 COPY . /app
 
-# Expose port (Render sets $PORT at runtime; we expose an arbitrary port)
-EXPOSE 8000
+# Streamlit run (example)
+EXPOSE 8501
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
 
-# Streamlit envs to ensure proper binding and headless mode
-ENV STREAMLIT_SERVER_HEADLESS=true
-ENV STREAMLIT_SERVER_ENABLECORS=false
-ENV STREAMLIT_SERVER_ENABLEXSRSFPROTECTION=false
-
-# Use sh -c so $PORT expands correctly at runtime
-CMD ["sh", "-c", "streamlit run app.py --server.port ${PORT:-8000} --server.address=0.0.0.0"]
 
 
 
